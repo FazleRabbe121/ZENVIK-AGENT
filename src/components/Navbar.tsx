@@ -164,11 +164,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                 ? 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-zinc-200'
                 : 'bg-slate-50 hover:bg-slate-100 border-slate-200/90 text-slate-700'
             }`}
-            title="Download Project ZIP, Push to GitHub & Build Android APK"
+            title="Open Apps & Installation Center"
           >
             <Smartphone className="w-3.5 h-3.5 text-sky-400" />
-            <span className="hidden sm:inline">APK &amp; GitHub</span>
-            <span className="sm:hidden">APK</span>
+            <span className="hidden sm:inline">Apps &amp; Install</span>
+            <span className="sm:hidden">Apps</span>
           </button>
 
           {/* Google Sign-In or User Profile */}
