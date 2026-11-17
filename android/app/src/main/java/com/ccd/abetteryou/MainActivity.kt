@@ -20,16 +20,18 @@ import android.widget.ProgressBar
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.webkit.WebViewAssetLoader
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
+    private lateinit var assetLoader: WebViewAssetLoader
 
     // Fallback live hosted app endpoints if local bundled assets aren't pre-built
     private val hostedAppUrl = "https://ais-dev-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app"
-    private val localAssetUrl = "file:///android_asset/dist/index.html"
+    private val localAssetUrl = "https://appassets.androidplatform.net/dist/index.html"
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -86,6 +88,10 @@ class MainActivity : ComponentActivity() {
         rootLayout.addView(progressBar)
         setContentView(rootLayout)
 
+        assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
+
         configureWebView()
 
         // Handle Back button
@@ -110,7 +116,7 @@ class MainActivity : ComponentActivity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
-        settings.allowFileAccess = true
+        settings.allowFileAccess = false
         settings.allowContentAccess = true
         settings.mediaPlaybackRequiresUserGesture = false
         settings.setSupportMultipleWindows(true)
@@ -200,6 +206,11 @@ class MainActivity : ComponentActivity() {
         }
 
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
+                val requestUrl = request?.url ?: return null
+                return assetLoader.shouldInterceptRequest(requestUrl)
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val uri = request?.url ?: return false
                 val scheme = uri.scheme ?: ""
