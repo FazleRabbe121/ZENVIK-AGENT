@@ -327,6 +327,10 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
+if (typeof window !== 'undefined') {
+  testConnection().catch(() => {});
+}
+
 // Google Sign-In with resilient Popup -> Redirect fallback for top-level mobile browsers
 export async function signInWithGoogle(): Promise<{ user: User; accessToken: string | null } | null> {
   try {

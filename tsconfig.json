@@ -18,10 +18,28 @@
     "jsx": "react-jsx",
     "paths": {
       "@/*": [
+        "./src/*",
         "./*"
       ]
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "drizzle.config.ts",
+    "vitest.config.ts",
+    "src/routes",
+    "src/routeTree.gen.ts",
+    "src/router.tsx",
+    "src/server.ts",
+    "src/start.ts",
+    "src/test",
+    "src/integrations",
+    "src/components/dashboard",
+    "src/components/site",
+    "src/components/ui",
+    "src/lib"
+  ]
 }
