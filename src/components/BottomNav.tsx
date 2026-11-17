@@ -14,6 +14,7 @@ import {
   UtensilsCrossed,
   Award,
   Wallet,
+  Smartphone,
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { NavTab } from './SidebarNav';
@@ -35,6 +36,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
 
   const tabs: { id: NavTab; label: string; icon: any; isMenu?: boolean }[] = [
     { id: 'dashboard', label: 'Home', icon: LayoutDashboard },
+    { id: 'apps-center', label: 'Apps', icon: Smartphone },
     { id: 'finance', label: 'Finance', icon: Wallet },
     { id: 'personal-ai', label: 'Personal AI', icon: Cpu },
     { id: 'recipe-book', label: 'Recipe Book', icon: UtensilsCrossed },
