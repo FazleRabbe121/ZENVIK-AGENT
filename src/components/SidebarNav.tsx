@@ -29,12 +29,14 @@ import {
   Mic,
   Cpu,
   Award,
+  Smartphone,
 } from 'lucide-react';
 import { useTheme, ThemeToggle } from '../context/ThemeContext';
 import { CCDLogo } from './CCDLogo';
 
 export type NavTab =
   | 'dashboard'
+  | 'apps-center'
   | 'personal-ai'
   | 'recipe-book'
   | 'google-sheets'
@@ -136,6 +138,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     { id: 'application-history' as NavTab, label: 'Application History', icon: Clock, count: historyCount },
     { id: 'employer-replies' as NavTab, label: 'Employer Replies', icon: Inbox, count: repliesCount, highlight: repliesCount > 0 },
     { id: 'rejected-reapply' as NavTab, label: 'Rejected & Reapply Later', icon: AlertOctagon, count: rejectionsCount },
+    { id: 'apps-center' as NavTab, label: 'Apps & Installation Center', icon: Smartphone, badge: 'Install' },
     { id: 'settings' as NavTab, label: 'Profile & Settings', icon: Settings },
   ];
 
