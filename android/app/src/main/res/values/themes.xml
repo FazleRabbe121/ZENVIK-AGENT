@@ -3,5 +3,10 @@
         <item name="android:statusBarColor">@color/royal_black</item>
         <item name="android:navigationBarColor">@color/royal_black</item>
         <item name="android:windowBackground">@color/royal_black</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">@color/metallic_gold</item>
+        <item name="android:windowSplashScreenBackground">@color/royal_black</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_zenvik_foreground</item>
     </style>
 </resources>
