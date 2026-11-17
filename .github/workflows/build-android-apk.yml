@@ -1,31 +1,28 @@
 
-name: Build Android APK
+name: Build ZENVIK Android APK
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build ZENVIK-AGENT Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -34,17 +31,18 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build web assets
+      - name: Build web app
         run: npm run build
         env:
           VITE_BASE_PATH: /
 
       - name: Generate Android project
         run: |
-          npx cap add android
-          npx cap sync android
+          rm -rf android
+          npx --no-install cap add android
+          npx --no-install cap sync android
 
-      - name: Build debug APK
+      - name: Build APK
         working-directory: android
         run: |
           chmod +x gradlew
@@ -53,7 +51,8 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZENVIK-AGENT-Android-APK
+          name: ZENVIK-AGENT-APK
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          
           
