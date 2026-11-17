@@ -46,7 +46,7 @@ jobs:
       - name: Build web application
         run: npm run build
         env:
-          VITE_BASE_PATH: /
+          VITE_BASE_PATH: ./
 
       - name: Bundle web assets into existing Android WebView project
         run: |
