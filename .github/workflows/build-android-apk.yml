@@ -1,58 +1,66 @@
-
 name: Build ZENVIK Android APK
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package.json'
+      - 'vite.config.ts'
+      - 'android/**'
+      - '.github/workflows/build-android-apk.yml'
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build ZENVIK-AGENT APK
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --no-audit --no-fund
 
-      - name: Build web app
+      - name: Build web application
         run: npm run build
         env:
           VITE_BASE_PATH: /
 
-      - name: Generate Android project
+      - name: Bundle web assets into existing Android WebView project
         run: |
-          rm -rf android
-          npx --no-install cap add android
-          npx --no-install cap sync android
+          test -f android/gradlew
+          test -f android/app/src/main/AndroidManifest.xml
+          rm -rf android/app/src/main/assets/dist
+          mkdir -p android/app/src/main/assets/dist
+          cp -R dist/. android/app/src/main/assets/dist/
 
-      - name: Build APK
+      - name: Build debug APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZENVIK-AGENT-APK
+          name: ZENVIK-AGENT-Android-APK
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          
-          
+          retention-days: 30
