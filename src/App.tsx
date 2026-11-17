@@ -51,6 +51,7 @@ import { InterviewPortalView } from './views/InterviewPortalView';
 import { InterviewAdminView } from './views/InterviewAdminView';
 import { PersonalAIView } from './views/PersonalAIView';
 import { CertificateGeneratorView } from './views/CertificateGeneratorView';
+import { AppsCenterView } from './views/AppsCenterView';
 import {
   CertificatePreselection,
   setPendingCertificatePreselection,
@@ -67,7 +68,6 @@ import { FamilyMoneyModal } from './components/FamilyMoneyModal';
 import { RecipeModal } from './components/RecipeModal';
 import { AIReportModal } from './components/AIReportModal';
 import { EducationalUrgeGuide } from './components/EducationalUrgeGuide';
-import { AndroidExportModal } from './components/AndroidExportModal';
 import { DeveloperGateModal, AppAccessLevel } from './components/DeveloperGateModal';
 import { useTheme } from './context/ThemeContext';
 
@@ -169,7 +169,6 @@ export default function App() {
   const [editingRecipe, setEditingRecipe] = useState<RecipeRecord | null>(null);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isUrgeGuideOpen, setIsUrgeGuideOpen] = useState(false);
-  const [isAndroidExportOpen, setIsAndroidExportOpen] = useState(false);
 
   // Network connectivity listener
   useEffect(() => {
@@ -838,7 +837,7 @@ export default function App() {
           onLogout={handleLogout}
           onOpenRelapseModal={() => setIsRelapseModalOpen(true)}
           onOpenUrgeGuide={() => setIsUrgeGuideOpen(true)}
-          onOpenAndroidExport={() => setIsAndroidExportOpen(true)}
+          onOpenAndroidExport={() => setCurrentTab('apps-center')}
           onOpenCVBuilder={() => setCurrentTab('cv-library')}
           onOpenApplyByEmail={() => setCurrentTab('gmail-center')}
           onLockApp={() => {
@@ -945,6 +944,8 @@ export default function App() {
               onOpenUrgeGuide={() => setIsUrgeGuideOpen(true)}
             />
           )}
+
+          {currentTab === 'apps-center' && <AppsCenterView />}
 
           {/* 1b. Personal AI Workspace (Isolated CareerPilot AI Agent Engineer System) */}
           {currentTab === 'personal-ai' && (
@@ -1057,7 +1058,7 @@ export default function App() {
               onGoogleSignIn={handleGoogleSignIn}
               onLogout={handleLogout}
               onRestoreState={setAppState}
-              onOpenAndroidExport={() => setIsAndroidExportOpen(true)}
+              onOpenAndroidExport={() => setCurrentTab('apps-center')}
               isCloudSynced={isCloudSynced}
             />
           )}
@@ -1284,12 +1285,6 @@ export default function App() {
         />
       )}
 
-      {isAndroidExportOpen && (
-        <AndroidExportModal
-          isOpen={isAndroidExportOpen}
-          onClose={() => setIsAndroidExportOpen(false)}
-        />
-      )}
     </div>
   );
 }
