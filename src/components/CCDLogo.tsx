@@ -2,9 +2,9 @@ import React from 'react';
 import { useTheme } from '../context/ThemeContext';
 
 export const ZENVIK_ICON_SRC =
-  '/assets/aistudio/file_00000000abf8820a8353e92b70669dc5_24b0e7a6.png';
+  `${import.meta.env.BASE_URL}assets/aistudio/file_00000000abf8820a8353e92b70669dc5_24b0e7a6.png`;
 export const ZENVIK_LOCKUP_SRC =
-  '/assets/aistudio/file_00000000901c820a8cd48a0ef1e8c6a7_2ef7f518.png';
+  `${import.meta.env.BASE_URL}assets/aistudio/file_00000000901c820a8cd48a0ef1e8c6a7_2ef7f518.png`;
 
 export interface CCDLogoProps {
   className?: string;
