@@ -1,15 +1,22 @@
-ZENVIK-AGENT Android build patch
+ZENVIK-AGENT — বাংলা ডকুমেন্টেশন
 
-এই ZIP-এর ফাইলগুলো repository root-এ একই path অনুযায়ী বসাতে হবে:
-- package.json
-- capacitor.config.ts
-- vite.config.ts
-- .github/workflows/build-android-apk.yml
+সম্পূর্ণ বাংলা ইনস্টলেশন ও আপডেট গাইড:
+https://github.com/FazleRabbe121/ZENVIK-AGENT/blob/main/docs/INSTALLATION-BN.md
 
-তারপর GitHub-এ commit করে Actions থেকে Build Android APK চালাতে হবে।
+ডকুমেন্টেশন সূচি:
+https://github.com/FazleRabbe121/ZENVIK-AGENT/tree/main/docs
 
-সতর্কতা:
-1) এটি configuration patch, সম্পূর্ণ source repository নয় এবং APK নয়।
-2) GitHub connector দিয়ে সরাসরি commit করার চেষ্টা 403 permission error-এ ব্যর্থ হয়েছে।
-3) পুরো application source, Firebase integration, backend/API এবং runtime behaviour যাচাই করতে সম্পূর্ণ repository ZIP প্রয়োজন।
-4) Repository-তে capacitor.config.ts আগে না থাকলে এই ZIP সেটি যোগ করে।
+সর্বশেষ Android APK:
+https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/download/android-latest/ZENVIK-AGENT-Android.apk
+
+Android Build History:
+https://github.com/FazleRabbe121/ZENVIK-AGENT/actions/workflows/build-android-apk.yml
+
+Repository:
+https://github.com/FazleRabbe121/ZENVIK-AGENT
+
+দ্রষ্টব্য:
+- Android APK GitHub Actions থেকে build হয়।
+- GitHub-এ code update করলে নতুন APK তৈরি হয়; ফোনে থাকা APK নিজে থেকে silently update হয় না।
+- Installed PWA website deployment-এর পর reload করলে নতুন web build পায়।
+- বর্তমান Android workflow Debug APK তৈরি করে; এটি Play Store production signing নয়।
