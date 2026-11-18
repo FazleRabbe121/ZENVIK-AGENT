@@ -47,6 +47,27 @@ app.get('/healthz', (_req: Request, res: Response) => {
   res.status(200).json({ ok: true, service: 'zenvik-agent', timestamp: new Date().toISOString() });
 });
 
+// Readiness diagnostics expose configuration presence only; never return keys or secret values.
+app.get('/readyz', (_req: Request, res: Response) => {
+  const geminiConfigured = hasConfiguredGeminiKey();
+  const checks = {
+    server: true,
+    gemini: geminiConfigured,
+    openai: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    grok: Boolean(process.env.GROK_API_KEY?.trim()),
+    ollamaRemote: Boolean(process.env.OLLAMA_BASE_URL && !/127\.0\.0\.1|localhost/i.test(process.env.OLLAMA_BASE_URL)),
+    databaseUrlConfigured: Boolean(process.env.DATABASE_URL),
+  };
+  const ready = checks.server && geminiConfigured;
+  res.status(ready ? 200 : 503).json({
+    ok: ready,
+    service: 'zenvik-agent',
+    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    checks,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 function hasConfiguredGeminiKey(): boolean {
   const key = process.env.GEMINI_API_KEY?.trim();
   return Boolean(key && key.length > 5 && key !== 'undefined' && key !== 'null');
@@ -99,7 +120,7 @@ Guidelines:
     }));
 
     const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       contents: chatContents,
       config: {
         systemInstruction: systemPrompt,
@@ -169,7 +190,7 @@ Provide 3 deep, objective behavioral observations analyzing how habit discipline
 Provide 3 concrete, high-impact tactical adjustments for spending, streak preservation, and personal mastery.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
 
@@ -1391,7 +1412,7 @@ Respond strictly in valid JSON format:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
 
@@ -1623,7 +1644,7 @@ STRICT RULES (MANDATORY):
     if (hasConfiguredGeminiKey()) {
       try {
         const response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+          model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
         });
         personalized = (response.text || '').trim();
@@ -1924,7 +1945,7 @@ Respond strictly in valid JSON format:
     if (hasConfiguredGeminiKey()) {
       try {
         const response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+          model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           config: {
             tools: [{ googleSearch: {} }],
@@ -2389,7 +2410,7 @@ Respond strictly in valid JSON format:
     if (hasConfiguredGeminiKey()) {
       try {
         const response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+          model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           config: {
             tools: [{ googleSearch: {} }],
@@ -2905,7 +2926,7 @@ Return strictly a JSON array of objects with fields:
 [{"employer": "...", "title": "...", "city": "...", "country": "...", "industry": "Hospitality, Beverage & Mixology", "recipientEmail": "", "applicationUrl": "https://...", "sourceName": "EURES / Official Hotel Careers", "postingDate": "YYYY-MM-DD or unknown", "sponsorshipEvidence": "...", "transparentCategory": "Confirmed by Official Evidence" | "Possible — Needs Verification"}]`;
 
         const resp = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+          model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
         });
         const rawText = (resp.text || '').trim();
@@ -3219,7 +3240,7 @@ app.get('/api/jobs/scheduler-status', (_req: Request, res: Response) => {
     activeProvider: 'gemini',
     preservedInactiveProviders: ['openai', 'grok'],
     providers: {
-      gemini: { status: 'active', model: 'gemini-4-hydrogen' },
+      gemini: { status: 'active', model: process.env.GEMINI_MODEL || 'gemini-3.8-flash' },
       openai: { status: 'preserved_inactive' },
       grok: { status: 'preserved_inactive' },
     },
@@ -3379,7 +3400,7 @@ Return strictly valid JSON with this structure:
 }`;
 
         const aiRes = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+          model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
           contents: [{ role: 'user', parts: [{ text: searchPrompt }] }],
         });
         const rawText = (aiRes.text || '').trim();

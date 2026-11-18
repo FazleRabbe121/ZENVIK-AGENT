@@ -515,7 +515,7 @@ async function callGeminiChat(
   });
 
   const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
+    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
     contents,
     config: {
       systemInstruction: toolContextText ? `${SYSTEM_INSTRUCTION}\n\n${toolContextText}` : SYSTEM_INSTRUCTION,
@@ -529,7 +529,7 @@ async function callGeminiChat(
 
   return {
     text: replyText,
-    modelUsed: 'gemini-4-hydrogen',
+    modelUsed: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
     provider: 'gemini',
   };
 }

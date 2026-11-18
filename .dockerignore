@@ -11,3 +11,7 @@ android/app/build
 .env.*
 !.env.example
 .DS_Store
+data/*.json
+jobhunter-agent/data/*.db
+*.sqlite
+*.sqlite3

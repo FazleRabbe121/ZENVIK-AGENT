@@ -1148,7 +1148,7 @@ STRICT EXTRACTION RULES (SECTION 7):
       },
     });
     const gemRes = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       contents: [
         {
           role: 'user',
@@ -1319,7 +1319,7 @@ Return ONLY valid JSON with this structure:
         },
       });
       const gemRes = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+        model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
         contents: [{ role: 'user', parts: [{ text: assistantSystemPrompt }] }],
         config: {
           responseMimeType: 'application/json',
