@@ -255,7 +255,7 @@ export const interviewStore = new InterviewCenterStorage();
 // ========================================================
 // GEMINI-ONLY AI CLIENT & SAFE RETRY / QUOTA MONITOR
 // ========================================================
-const PRIMARY_INTERVIEW_MODEL = 'gemini-4-hydrogen';
+const PRIMARY_INTERVIEW_MODEL = process.env.GEMINI_INTERVIEW_MODEL || process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
 const TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 
