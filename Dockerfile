@@ -12,7 +12,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv python3-pip build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json package-lock.json* ./
+COPY package.json ./
 RUN npm install --no-audit --no-fund
 
 COPY jobhunter-agent/requirements.txt ./jobhunter-agent/requirements.txt
