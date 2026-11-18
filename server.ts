@@ -55,8 +55,8 @@ app.get('/readyz', (_req: Request, res: Response) => {
     gemini: geminiConfigured,
     openai: Boolean(process.env.OPENAI_API_KEY?.trim()),
     grok: Boolean(process.env.GROK_API_KEY?.trim()),
-    ollamaRemote: Boolean(process.env.OLLAMA_BASE_URL && !/127\\.0\\.0\\.1|localhost/i.test(process.env.OLLAMA_BASE_URL)),
-    persistentDatabase: Boolean(process.env.DATABASE_URL || process.env.FIRESTORE_DATABASE_ID),
+    ollamaRemote: Boolean(process.env.OLLAMA_BASE_URL && !/127\.0\.0\.1|localhost/i.test(process.env.OLLAMA_BASE_URL)),
+    databaseUrlConfigured: Boolean(process.env.DATABASE_URL),
   };
   const ready = checks.server && geminiConfigured;
   res.status(ready ? 200 : 503).json({
