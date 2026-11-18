@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+dist
+coverage
+android/.gradle
+android/app/build
+*.apk
+*.aab
+.env
+.env.*
+!.env.example
+.DS_Store
