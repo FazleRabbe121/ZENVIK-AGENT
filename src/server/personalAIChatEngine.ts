@@ -529,7 +529,7 @@ async function callGeminiChat(
 
   return {
     text: replyText,
-    modelUsed: 'gemini-4-hydrogen',
+    modelUsed: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
     provider: 'gemini',
   };
 }
