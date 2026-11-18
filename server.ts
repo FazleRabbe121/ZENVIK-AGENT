@@ -31,15 +31,21 @@ const cliArgs = process.argv.slice(2);
 const portFlagIdx = cliArgs.indexOf('--port');
 const hostFlagIdx = cliArgs.indexOf('--host');
 
+// Cloud Run injects PORT. Keep CLI override for local diagnostics.
 const PORT = portFlagIdx !== -1 && cliArgs[portFlagIdx + 1]
   ? parseInt(cliArgs[portFlagIdx + 1], 10)
-  : (process.env.APP_PORT ? parseInt(process.env.APP_PORT, 10) : 3000);
+  : (process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.APP_PORT ? parseInt(process.env.APP_PORT, 10) : 8080));
 
 const HOST = hostFlagIdx !== -1 && cliArgs[hostFlagIdx + 1]
   ? cliArgs[hostFlagIdx + 1]
   : '0.0.0.0';
 
 app.use(express.json({ limit: '10mb' }));
+
+// Cloud Run startup/liveness probe. This intentionally does not expose secrets or provider details.
+app.get('/healthz', (_req: Request, res: Response) => {
+  res.status(200).json({ ok: true, service: 'zenvik-agent', timestamp: new Date().toISOString() });
+});
 
 function hasConfiguredGeminiKey(): boolean {
   const key = process.env.GEMINI_API_KEY?.trim();
