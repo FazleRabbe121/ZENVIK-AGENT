@@ -74,11 +74,13 @@ jobs:
         run: |
           TAG="android-latest"
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="android/app/build/outputs/apk/debug/ZENVIK-AGENT-Android.apk"
           test -f "$APK"
+          cp "$APK" "$RELEASE_APK"
           if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release delete "$TAG" --repo "$GH_REPO" --yes --cleanup-tag
           fi
-          gh release create "$TAG" "$APK#ZENVIK-AGENT-Android.apk" \
+          gh release create "$TAG" "$RELEASE_APK" \
             --repo "$GH_REPO" \
             --target "$GITHUB_SHA" \
             --title "ZENVIK-AGENT Android — Latest" \
