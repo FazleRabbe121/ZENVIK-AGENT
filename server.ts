@@ -47,6 +47,27 @@ app.get('/healthz', (_req: Request, res: Response) => {
   res.status(200).json({ ok: true, service: 'zenvik-agent', timestamp: new Date().toISOString() });
 });
 
+// Readiness diagnostics expose configuration presence only; never return keys or secret values.
+app.get('/readyz', (_req: Request, res: Response) => {
+  const geminiConfigured = hasConfiguredGeminiKey();
+  const checks = {
+    server: true,
+    gemini: geminiConfigured,
+    openai: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    grok: Boolean(process.env.GROK_API_KEY?.trim()),
+    ollamaRemote: Boolean(process.env.OLLAMA_BASE_URL && !/127\\.0\\.0\\.1|localhost/i.test(process.env.OLLAMA_BASE_URL)),
+    persistentDatabase: Boolean(process.env.DATABASE_URL || process.env.FIRESTORE_DATABASE_ID),
+  };
+  const ready = checks.server && geminiConfigured;
+  res.status(ready ? 200 : 503).json({
+    ok: ready,
+    service: 'zenvik-agent',
+    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    checks,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 function hasConfiguredGeminiKey(): boolean {
   const key = process.env.GEMINI_API_KEY?.trim();
   return Boolean(key && key.length > 5 && key !== 'undefined' && key !== 'null');
