@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "users": {
+    "usr_owner_fazle_rabbi": {
+      "userId": "usr_owner_fazle_rabbi",
+      "email": "fazle.rabbe.doc@gmail.com",
+      "displayName": "Fazle Rabbi (Owner & Admin)",
+      "authProvider": "google",
+      "role": "admin",
+      "status": "active",
+      "defaultEmailSubject": "Job Application — Experienced Hospitality Professional",
+      "defaultCoverLetter": "Dear Hiring Manager,\n\nPlease find attached my CV for your consideration.\n\nBest regards,\nFazle Rabbi",
+      "dailySendLimit": 40,
+      "minDelaySeconds": 45,
+      "createdAt": "2026-11-18T23:02:40.399Z",
+      "updatedAt": "2026-11-18T23:02:40.399Z",
+      "lastLoginAt": "2026-11-18T23:02:40.399Z"
+    }
+  },
+  "gmailConnections": {},
+  "cvsByUser": {},
+  "applicationsByUser": {},
+  "emailHistoryByUser": {},
+  "pendingOAuthStates": {},
+  "systemStats": {
+    "totalRegistrations": 1,
+    "totalEmailsSent": 0,
+    "totalEmailsFailed": 0,
+    "totalOAuthConnections": 0,
+    "totalAuthErrors": 0,
+    "lastUpdatedAt": "2026-11-18T23:02:40.400Z"
+  }
+}

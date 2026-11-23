@@ -13,6 +13,7 @@ import { aiCooperativeEngine } from './src/server/aiCooperativeEngine.js';
 import { personalAIChatRouter } from './src/server/personalAIChatEngine.js';
 import { recipeBookRouter } from './src/server/recipeBookServer.js';
 import { pythonJobHunterBridge } from './src/server/pythonJobHunterBridge.js';
+import { defaultMultiUserSaaS } from './src/server/multiUserSaaSServer.js';
 
 dotenv.config();
 
@@ -4189,6 +4190,12 @@ app.get('/api/finance/sheets-webhook-status', (req: Request, res: Response) => {
     ok: true,
     lastEvent: financeSheetEditEvents[spreadsheetId] || null,
   });
+});
+
+// 15. Multi-User SaaS Authentication, Personal Gmail OAuth 2.0 (gmail.send), Isolated CV/Application API & Admin Panel
+app.use('/api', defaultMultiUserSaaS.router);
+app.get(['/auth/callback', '/auth/callback/'], (req: Request, res: Response) => {
+  return defaultMultiUserSaaS.handleOAuthCallback(req, res);
 });
 
 // Start dev Vite or serve production build

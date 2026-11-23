@@ -36,7 +36,6 @@ import { CCDLogo } from './CCDLogo';
 
 export type NavTab =
   | 'dashboard'
-  | 'apps-center'
   | 'personal-ai'
   | 'recipe-book'
   | 'google-sheets'
@@ -54,11 +53,13 @@ export type NavTab =
   | 'cover-letters'
   | 'photos-docs'
   | 'certificate'
+  | 'gmail-integration'
   | 'gmail-center'
   | 'bulk-queue'
   | 'application-history'
   | 'employer-replies'
   | 'rejected-reapply'
+  | 'apps-center'
   | 'settings'
   // Preserved personal & finance sections
   | 'jobs'
@@ -132,13 +133,14 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
 
   // Group 3: Gmail, Applications & History
   const applicationWorkflow = [
+    { id: 'gmail-integration' as NavTab, label: 'Personal Gmail & OAuth', icon: Mail, badge: 'Multi-User' },
     { id: 'gmail-center' as NavTab, label: 'Gmail Application Center', icon: Mail },
     { id: 'bulk-queue' as NavTab, label: 'Email Delivery Center & Queue', icon: Layers, count: approvedCount, badge: 'Queue' },
     { id: 'google-sheets' as NavTab, label: 'Google Sheets Tracker', icon: FileSpreadsheet, badge: 'Live' },
     { id: 'application-history' as NavTab, label: 'Application History', icon: Clock, count: historyCount },
     { id: 'employer-replies' as NavTab, label: 'Employer Replies', icon: Inbox, count: repliesCount, highlight: repliesCount > 0 },
     { id: 'rejected-reapply' as NavTab, label: 'Rejected & Reapply Later', icon: AlertOctagon, count: rejectionsCount },
-    { id: 'apps-center' as NavTab, label: 'Apps & Installation Center', icon: Smartphone, badge: 'Install' },
+    { id: 'apps-center' as NavTab, label: 'Apps & Installation Center', icon: Smartphone, badge: 'APK / PWA' },
     { id: 'settings' as NavTab, label: 'Profile & Settings', icon: Settings },
   ];
 

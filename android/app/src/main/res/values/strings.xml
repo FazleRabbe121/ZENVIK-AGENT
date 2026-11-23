@@ -1,3 +1,4 @@
 <resources>
-    <string name="app_name">ZENVIK-AGENT</string>
+    <string name="app_name">ZENVIK Agent</string>
+    <string name="default_habit">Personal Mastery</string>
 </resources>

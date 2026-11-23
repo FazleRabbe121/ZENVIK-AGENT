@@ -1,0 +1,77 @@
+name: Deploy ZENVIK AGENT to Google Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || 'ccd---a-better-you-every-day' }}
+  REGION: europe-west2
+  SERVICE_NAME: zenvik-agent-backend
+
+jobs:
+  test-and-verify:
+    name: Typecheck, Unit Tests & Production Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: TypeScript Lint Check
+        run: npm run lint
+
+      - name: Run Automated Backend & Multi-User Test Suite
+        run: npm test
+
+      - name: Build Production Bundle
+        run: npm run build
+
+  deploy-cloud-run:
+    name: Build Container & Deploy to Google Cloud Run
+    needs: test-and-verify
+    if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && secrets.GCP_SA_KEY != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build & Push Container Image via Cloud Build
+        run: |
+          gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA
+
+      - name: Deploy to Google Cloud Run (europe-west2)
+        run: |
+          gcloud run deploy $SERVICE_NAME \
+            --image gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --min-instances 0 \
+            --max-instances 10 \
+            --memory 1Gi \
+            --cpu 1 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
+            --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest,ZENVIK_TOKEN_ENCRYPTION_KEY=ZENVIK_TOKEN_ENCRYPTION_KEY:latest"

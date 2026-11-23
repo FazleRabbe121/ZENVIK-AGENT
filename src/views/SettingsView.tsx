@@ -30,6 +30,8 @@ import { ThemeToggle, useTheme } from '../context/ThemeContext';
 import { CCDLogo } from '../components/CCDLogo';
 import { exportAllCVsAsJSON, syncAndLoadCloudCVLibrary, loadCVLibrary } from '../services/cvStorage';
 import { syncCloudCentralProfile, loadCentralProfile } from '../services/centralProfileService';
+import { GmailIntegrationView } from './GmailIntegrationView';
+import { ConnectedServicesView } from './ConnectedServicesView';
 
 interface SettingsViewProps {
   user: FirebaseUser | null;
@@ -729,6 +731,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <Download className="w-4 h-4" />
           <span>GitHub & APK Hub</span>
         </button>
+      </div>
+
+      {/* 5a. Settings -> Connected Services & Permission Management Dashboard (Phase 15.2, 15.3 & 15.5) */}
+      <div id="settings-connected-services" className="pt-2">
+        <ConnectedServicesView />
+      </div>
+
+      {/* 5b. Settings -> Gmail Integration (Multi-User Personal Gmail OAuth 2.0 & Isolated Workspace) */}
+      <div id="settings-gmail-integration" className="pt-2">
+        <GmailIntegrationView />
       </div>
 
       {/* 6. About ZENVIK & Privacy */}

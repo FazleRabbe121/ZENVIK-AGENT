@@ -371,21 +371,36 @@ export async function loadUserDataFromCloud(userId: string): Promise<{
     };
   }
 
-  // Case 2: No Cloud Workspace Yet -> Carefully migrate local data & any existing cv_accounts data (including legacy fazlerabbe905_gmail_com) to Firestore for this UID
-  console.info(`Initial cloud workspace creation for authenticated UID ${userId}. Migrating local & legacy account records...`);
+  // Case 2: No Cloud Workspace Yet -> Migrate only the authenticated user's own cv_accounts record (and only include owner legacy IDs if this user IS the owner)
+  console.info(`Initial cloud workspace creation for authenticated UID ${userId}. Initializing isolated user workspace...`);
   const now = new Date().toISOString();
+  const isOwnerAdmin =
+    userEmail.trim().toLowerCase() === 'fazle.rabbe.doc@gmail.com' ||
+    userEmail.trim().toLowerCase() === 'fazlerabbe905@gmail.com';
 
-  let localCVs = loadCVLibrary();
-  let localProfile = loadCentralProfile();
+  let localCVs = isOwnerAdmin ? loadCVLibrary() : [];
+  let localProfile = isOwnerAdmin
+    ? loadCentralProfile()
+    : {
+        ...loadCentralProfile(),
+        fullName: userName,
+        email: userEmail,
+        sendingHistory: [],
+        savedRecipients: [],
+      };
 
   if (!isOfflineMode) {
     try {
       const candidateAccountDocIds = Array.from(
-        new Set([
-          userEmail.trim().toLowerCase().replace(/[^a-z0-9]/g, '_'),
-          'fazle_rabbe_doc_gmail_com',
-          'fazlerabbe905_gmail_com',
-        ])
+        new Set(
+          isOwnerAdmin
+            ? [
+                userEmail.trim().toLowerCase().replace(/[^a-z0-9]/g, '_'),
+                'fazle_rabbe_doc_gmail_com',
+                'fazlerabbe905_gmail_com',
+              ]
+            : [userEmail.trim().toLowerCase().replace(/[^a-z0-9]/g, '_')]
+        )
       );
       for (const accDocId of candidateAccountDocIds) {
         const accSnap = await getDoc(doc(db, 'cv_accounts', accDocId));

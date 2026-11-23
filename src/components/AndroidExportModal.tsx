@@ -30,6 +30,8 @@ export const AndroidExportModal: React.FC<AndroidExportModalProps> = ({ isOpen, 
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   const [isInstalled, setIsInstalled] = useState(false);
 
+  const [installNotice, setInstallNotice] = useState<string | null>(null);
+
   const sharedAppUrl = 'https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app';
 
   useEffect(() => {
@@ -56,10 +58,13 @@ export const AndroidExportModal: React.FC<AndroidExportModalProps> = ({ isOpen, 
       const choiceResult = await installPrompt.userChoice;
       if (choiceResult.outcome === 'accepted') {
         setIsInstalled(true);
+        setInstallNotice('অ্যাপটি সফলভাবে ইনস্টল হচ্ছে (Installation accepted).');
       }
       setInstallPrompt(null);
     } else {
-      alert('আপনার মোবাইলের Google Chrome ব্রাউজারে গিয়ে উপরের তিনটি ডট (⋮) চাপুন এবং "Install app" অথবা "Add to Home screen" চাপুন।');
+      setInstallNotice(
+        'আপনার মোবাইলের Google Chrome ব্রাউজারে গিয়ে উপরের তিনটি ডট (⋮) চাপুন এবং "Install app" অথবা "Add to Home screen" চাপুন।'
+      );
     }
   };
 
@@ -320,15 +325,22 @@ git push -u origin main`;
               </div>
 
               {/* Install Button if supported */}
-              <div className="pt-1 flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleTriggerInstall}
-                  className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:opacity-95 text-slate-950 font-bold text-xs uppercase tracking-wider flex items-center gap-2 shadow"
-                >
-                  <Smartphone className="w-4 h-4" />
-                  <span>{isInstalled ? 'App Already Installed' : 'মোবাইলে অ্যাপ ইনস্টল করুন (Install App)'}</span>
-                </button>
+              <div className="pt-1 flex flex-col gap-2">
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleTriggerInstall}
+                    className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:opacity-95 text-slate-950 font-bold text-xs uppercase tracking-wider flex items-center gap-2 shadow cursor-pointer"
+                  >
+                    <Smartphone className="w-4 h-4" />
+                    <span>{isInstalled ? 'App Already Installed' : 'মোবাইলে অ্যাপ ইনস্টল করুন (Install App)'}</span>
+                  </button>
+                </div>
+                {installNotice && (
+                  <div className="p-2.5 rounded-xl bg-blue-950/50 border border-blue-500/40 text-blue-200 text-xs">
+                    {installNotice}
+                  </div>
+                )}
               </div>
             </div>
 

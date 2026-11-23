@@ -247,10 +247,44 @@ export async function ensureFreshGoogleAccessToken(minRemainingMs: number = 5 * 
 
 export const PRIMARY_ADMIN_EMAIL = 'fazle.rabbe.doc@gmail.com';
 export const LEGACY_ADMIN_EMAIL = 'fazlerabbe905@gmail.com';
+const STORAGE_KEY_LAST_ACTIVE_UID = 'zenvik_last_active_uid_v1';
+
+const USER_SCOPED_LOCAL_STORAGE_KEYS = [
+  STORAGE_KEY_TOKEN,
+  STORAGE_KEY_TOKEN_EXPIRY,
+  STORAGE_KEY_USER_EMAIL,
+  STORAGE_KEY_USER_NAME,
+  'cv_authorized_gmail_sender_accounts_v1',
+  'cv_email_sending_history_v1',
+  'cv_persistent_gmail_queue_v2',
+  'multi_cv_library_v2',
+  'multi_cv_active_id_v2',
+  'cv_uploaded_binaries_vault_v1',
+  'job_search_saved_jobs_v1',
+  'ccd_saved_jobs_v3',
+  'cv_applied_jobs_history_v2',
+  'gmail_application_history_v1',
+  'cv_rejected_applications_v1',
+  'central_user_profile_v2',
+  'ccd_central_profile_v2',
+  'user_career_profile_v2',
+];
+
+export function clearUserScopedLocalStorage(): void {
+  cachedGoogleToken = null;
+  try {
+    for (const key of USER_SCOPED_LOCAL_STORAGE_KEYS) {
+      localStorage.removeItem(key);
+    }
+  } catch {}
+}
 
 export function getCachedUserEmail(): string {
   try {
-    return localStorage.getItem(STORAGE_KEY_USER_EMAIL) || auth.currentUser?.email || PRIMARY_ADMIN_EMAIL;
+    if (auth.currentUser?.email) return auth.currentUser.email;
+    const multiUserEmail = localStorage.getItem('zenvik_multiuser_active_email_v1');
+    if (multiUserEmail) return multiUserEmail;
+    return localStorage.getItem(STORAGE_KEY_USER_EMAIL) || PRIMARY_ADMIN_EMAIL;
   } catch {
     return PRIMARY_ADMIN_EMAIL;
   }
@@ -264,22 +298,31 @@ export function setCachedUserEmail(email: string) {
 
 export function getCachedUserName(): string {
   try {
-    return localStorage.getItem(STORAGE_KEY_USER_NAME) || auth.currentUser?.displayName || 'Fazle Rabbi';
+    if (auth.currentUser?.displayName) return auth.currentUser.displayName;
+    const multiUserName = localStorage.getItem('zenvik_multiuser_active_name_v1');
+    if (multiUserName) return multiUserName;
+    return localStorage.getItem(STORAGE_KEY_USER_NAME) || 'Fazle Rabbi';
   } catch {
     return 'Fazle Rabbi';
   }
 }
 
-// Auto-sync auth state into local storage for seamless sync in downloaded app
+// Auto-sync auth state into local storage and isolate localStorage when switching user accounts
 onAuthStateChanged(auth, user => {
-  if (user) {
-    if (user.email) setCachedUserEmail(user.email);
-    if (user.displayName) {
-      try {
+  try {
+    const prevUid = localStorage.getItem(STORAGE_KEY_LAST_ACTIVE_UID);
+    if (user) {
+      if (prevUid && prevUid !== user.uid) {
+        // Different user logged in on this browser — wipe previous user's local caches
+        clearUserScopedLocalStorage();
+      }
+      localStorage.setItem(STORAGE_KEY_LAST_ACTIVE_UID, user.uid);
+      if (user.email) setCachedUserEmail(user.email);
+      if (user.displayName) {
         localStorage.setItem(STORAGE_KEY_USER_NAME, user.displayName);
-      } catch {}
+      }
     }
-  }
+  } catch {}
 });
 
 // Auto-capture redirect authentication on top-level mobile devices & webviews only
@@ -331,6 +374,26 @@ if (typeof window !== 'undefined') {
   testConnection().catch(() => {});
 }
 
+// Least-privilege provider requesting ONLY gmail.send for personal Gmail connection
+export const gmailSendOnlyProvider = new GoogleAuthProvider();
+gmailSendOnlyProvider.addScope('https://www.googleapis.com/auth/gmail.send');
+gmailSendOnlyProvider.setCustomParameters({
+  prompt: 'consent select_account',
+});
+
+export async function authorizePersonalGmailSendWithPopup(): Promise<{
+  user: User;
+  accessToken: string | null;
+} | null> {
+  const result = await signInWithPopup(auth, gmailSendOnlyProvider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  const token = credential?.accessToken || null;
+  if (token) {
+    setCachedGoogleToken(token);
+  }
+  return { user: result.user, accessToken: token };
+}
+
 // Google Sign-In with resilient Popup -> Redirect fallback for top-level mobile browsers
 export async function signInWithGoogle(): Promise<{ user: User; accessToken: string | null } | null> {
   try {
@@ -375,7 +438,13 @@ export async function signInWithGoogle(): Promise<{ user: User; accessToken: str
 export const signInWithGooglePopup = signInWithGoogle;
 
 export async function logOut(): Promise<void> {
-  setCachedGoogleToken(null);
+  clearUserScopedLocalStorage();
+  try {
+    localStorage.removeItem(STORAGE_KEY_LAST_ACTIVE_UID);
+    localStorage.removeItem('zenvik_multiuser_session_token_v1');
+    localStorage.removeItem('zenvik_multiuser_active_email_v1');
+    localStorage.removeItem('zenvik_multiuser_active_name_v1');
+  } catch {}
   await signOut(auth);
 }
 

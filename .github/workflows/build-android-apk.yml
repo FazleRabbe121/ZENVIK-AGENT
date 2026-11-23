@@ -1,91 +1,110 @@
-name: Build ZENVIK Android APK
+name: Build Android APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'public/**'
-      - 'index.html'
-      - 'package.json'
-      - 'vite.config.ts'
-      - 'android/**'
-      - '.github/workflows/build-android-apk.yml'
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Build ZENVIK-AGENT APK
+    name: Validate, Build & Package Android APK
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Frontend & Backend Dependencies
+        run: npm install
+
+      - name: TypeScript Validation
+        run: npm run lint
+
+      - name: Run Automated Unit & Integration Tests
+        run: npm test
+
+      - name: Build Production Web Application
+        run: npm run build
+        env:
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+
+      - name: Bundle Web Assets into Android Assets (WebViewAssetLoader)
+        run: |
+          rm -rf android/app/src/main/assets/dist
+          mkdir -p android/app/src/main/assets/dist
+          cp -r dist/* android/app/src/main/assets/dist/
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle 8.9
+      - name: Setup Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: 8.10.2
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+      - name: Grant Execute Permission for Gradle Wrapper
+        run: chmod +x android/gradlew
 
-      - name: Validate TypeScript
-        run: npm run lint
-
-      - name: Build web application
-        run: npm run build
-        env:
-          VITE_BASE_PATH: ./
-
-      - name: Bundle web assets into existing Android WebView project
-        run: |
-          test -f android/app/src/main/AndroidManifest.xml
-          rm -rf android/app/src/main/assets/dist
-          mkdir -p android/app/src/main/assets/dist
-          cp -R dist/. android/app/src/main/assets/dist/
-
-      - name: Build debug APK
+      - name: Build Android Debug APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          ./gradlew assembleDebug --stacktrace || gradle assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Prepare Named APK Artifacts
+        id: apk_path
+        run: |
+          APK_FILE=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$APK_FILE" ]; then
+            echo "Error: APK file was not generated."
+            exit 1
+          fi
+          cp "$APK_FILE" android/app/build/outputs/apk/debug/ZENVIK-AGENT-debug.apk
+          echo "Found APK: $APK_FILE"
+          echo "apk_file=$APK_FILE" >> $GITHUB_OUTPUT
+
+      - name: Upload ZENVIK Android Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ZENVIK-AGENT-Android-APK
-          path: android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          name: ZENVIK-AGENT-Android-Debug-APK
+          path: |
+            android/app/build/outputs/apk/debug/ZENVIK-AGENT-debug.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      - name: Publish direct latest APK download
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          TAG="android-latest"
-          APK="android/app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_APK="android/app/build/outputs/apk/debug/ZENVIK-AGENT-Android.apk"
-          test -f "$APK"
-          cp "$APK" "$RELEASE_APK"
-          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release delete "$TAG" --repo "$GH_REPO" --yes --cleanup-tag
-          fi
-          gh release create "$TAG" "$RELEASE_APK" \
-            --repo "$GH_REPO" \
-            --target "$GITHUB_SHA" \
-            --title "ZENVIK-AGENT Android — Latest" \
-            --notes "Automated debug APK built from commit $GITHUB_SHA. Install on Android 8.0 or newer. This is a debug-signed build for testing." \
-            --prerelease
+      - name: Publish Latest Debug APK to GitHub Releases
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-debug
+          name: ZENVIK Agent v1.0.0 (Debug APK Build)
+          body: |
+            Automated Android Debug APK build from commit `${{ github.sha }}`.
+            - **Package ID**: `com.ccd.abetteryou.debug` (Base ID: `com.ccd.abetteryou`)
+            - **Version**: `1.0.0` (`versionCode: 1`)
+            - **Asset Loader**: `androidx.webkit.WebViewAssetLoader` (`https://appassets.androidplatform.net`)
+            - **Note**: This is an automated Debug APK for testing and direct installation, not a Play Store signed production build.
+          files: |
+            android/app/build/outputs/apk/debug/ZENVIK-AGENT-debug.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
+          prerelease: false
+          make_latest: true

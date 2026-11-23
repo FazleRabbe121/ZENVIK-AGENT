@@ -1,94 +1,105 @@
-# Developer Setup
+# ZENVIK-AGENT — Developer Guide (`DEVELOPMENT.md`)
 
-## Stack
+This guide explains how to set up, develop, test, and build the **ZENVIK-AGENT** platform locally.
 
-- React 19 + TypeScript
-- Vite 8 build tool
-- Tailwind CSS 4 through the Vite plugin
-- Firebase Web SDK (Authentication / Firestore integration)
-- Express server entry point: server.ts
-- Android WebView wrapper under android/
-- GitHub Actions for Pages deployment and Android APK builds
+---
 
-Check package.json for the exact package versions and scripts.
+## 1. Repository Structure
 
-## Requirements
+```text
+/
+├── android/                  # Native Android Kotlin/Gradle wrapper project (SDK 26-35)
+├── data/                     # Local JSON persistence fallbacks for Express server routes
+├── docs/                     # Platform, architecture, release, and Bengali user documentation
+├── jobhunter-agent/          # Standalone Python 3 CLI & Telegram job-hunting agent
+├── migrations/               # SQL reference schema for agent engine
+├── public/                   # Static assets, ZENVIK brand icons, PWA manifest.json, sw.js
+├── src/
+│   ├── components/           # Reusable UI components (Navbar, SidebarNav, BottomNav, Modals)
+│   ├── content/              # Static portfolio/hospitality copy and recipe catalogs
+│   ├── context/              # React contexts (AuthContext, AppContext, ThemeContext)
+│   ├── modules/              # Modular feature packages (personal-ai, interview-center)
+│   ├── services/             # Firebase, Gemini AI, Job Search, Gmail OAuth & Email Queue services
+│   └── views/                # Full-screen application views (including AppsCenterView)
+├── tests/                    # Automated Node.js test suites (personal-ai & zenvik-audit)
+├── server.ts                 # Express + Vite full-stack server entry point (Port 3000)
+└── vite.config.ts            # Vite bundler configuration
+```
 
-- Node.js 22 (matches the GitHub Actions workflow)
-- npm
-- Java 17 for Android builds
-- Gradle 8.9 for the current Android workflow
-- Android SDK / Android Studio for local Android device testing
+---
 
-## Install and run
+## 2. Environment Variables (`.env`)
 
-    npm install
-    npm run dev
+Copy `.env.example` to `.env` before starting development:
 
-The dev script runs tsx server.ts. The actual host/port and available server routes are defined in server.ts; do not assume the frontend-only GitHub Pages deployment runs this Express server.
+```bash
+cp .env.example .env
+```
 
-Build the frontend:
+### Supported Variables
 
-    npm run build
+| Variable | Required | Scope | Description |
+| :--- | :---: | :---: | :--- |
+| `GEMINI_API_KEY` | Yes (for AI routes) | Server (`server.ts`) | Google Gemini API key used for CV tailoring, job discovery, interview simulation, and Personal AI |
+| `VITE_GOOGLE_CLIENT_ID` | Optional | Client (`src/`) | OAuth 2.0 Web Client ID for direct browser Gmail API access |
+| `ADZUNA_APP_ID` / `ADZUNA_API_KEY` | Optional | Server | Live job feed enrichment from Adzuna |
+| `JOOBLE_API_KEY` | Optional | Server | Live job feed enrichment from Jooble |
+| `REED_API_KEY` | Optional | Server | Live UK/Europe job feed enrichment from Reed |
+| `SERPAPI_API_KEY` | Optional | Server | Google Jobs aggregation via SerpApi |
+| `FINDWORK_API_KEY` | Optional | Server | Tech & remote job feed via Findwork |
 
-TypeScript check:
+> **Security Note**: Never commit `.env` or hardcode API secrets into client code. `firebase-applet-config.json` contains standard public Firebase Web SDK identifiers secured via `firestore.rules`.
 
-    npm run lint
+---
 
-## Environment and secrets
+## 3. Running & Testing Locally
 
-Use .env.example as a variable-name reference. Do not commit a real .env file or private credentials.
+### Start Full-Stack Development Server
+```bash
+npm install
+npm run dev
+```
+Runs `tsx server.ts` on `http://localhost:3000`, mounting both Express `/api/*` endpoints and Vite middleware.
 
-Variables listed in the example include:
-- GEMINI_API_KEY — Gemini server-side calls
-- OPENAI_API_KEY — optional OpenAI verification
-- GROK_API_KEY — optional xAI verification
-- APP_URL — hosted application/backend URL
-- Personal AI engine and scheduler configuration values
+### Run TypeScript Verification (`lint`)
+```bash
+npm run lint
+```
+Executes `tsc --noEmit` to validate all TypeScript types across `src/` and `server.ts`.
 
-Configure secret values in the appropriate hosting provider or GitHub Settings → Secrets and variables → Actions only when a workflow actually consumes them. Never expose server secrets in Vite client-side VITE_* variables or browser bundles.
+### Run Automated Node.js Tests
+```bash
+npm test
+```
+Executes:
+- `tests/personal-ai/*.test.mjs` (30 tests covering intent routing, memory extraction, reminders, study plans, and chat orchestration)
+- `tests/zenvik-audit.test.mjs` (6 comprehensive architectural, security, queue safety, Android `WebViewAssetLoader`, and documentation tests)
 
-The Firebase web configuration is imported by src/services/firebase.ts from firebase-applet-config.json. Firebase web configuration is client-visible by design; access control must be enforced with Firebase Authentication, Firestore Security Rules, and provider-side restrictions. Review firestore.rules before production use.
+### Run Standalone Python Agent Tests
+```bash
+python3 -m unittest discover -s jobhunter-agent/tests
+```
 
-## Base paths
+### Production Build
+```bash
+npm run build
+```
+Compiles the frontend SPA into `dist/`.
 
-vite.config.ts reads VITE_BASE_PATH.
+---
 
-- GitHub Pages build defaults to /ZENVIK-AGENT/ through .github/workflows/deploy.yml.
-- Android bundled build sets VITE_BASE_PATH=./ so local WebView assets resolve relative to the bundled app.
-- Keep PWA manifest, HTML icon references, and app logo asset paths relative/base-aware. Do not add root-absolute asset paths that break repository Pages URLs.
+## 4. Building the Android APK Locally
 
-## Deployment workflows
-
-### GitHub Pages
-
-.github/workflows/deploy.yml runs on pushes to main and on manual dispatch. It builds and deploys the static frontend using GitHub Pages. It does not deploy server.ts as a persistent Express backend.
-
-### Android APK
-
-.github/workflows/build-android-apk.yml runs on manual dispatch and changes to the configured frontend/Android build paths on main. It:
-
-1. Checks out the repository.
-2. Installs Node dependencies and Java 17 / Gradle 8.9.
-3. Runs npm run build with VITE_BASE_PATH=./.
-4. Copies dist/ into android/app/src/main/assets/dist/.
-5. Runs gradle assembleDebug.
-6. Uploads the APK ZIP artifact.
-7. Publishes ZENVIK-AGENT-Android.apk to the android-latest GitHub Release.
-
-The workflow uses GITHUB_TOKEN with contents: write for the release asset. Keep that permission limited to the build workflow.
-
-## Android application details
-
-- Namespace / release application ID: com.ccd.abetteryou
-- Debug application ID: com.ccd.abetteryou.debug (debug suffix is configured in android/app/build.gradle.kts)
-- Minimum Android API: 26
-- Compile / target SDK: 35
-- Java / Kotlin target: 17
-- Native WebView assets are served with AndroidX WebViewAssetLoader at https://appassets.androidplatform.net/.
-
-The current CI produces a debug-signed APK. For public Play Store distribution, create a separate release signing setup using a protected upload/signing key, version-code management, app bundle configuration, and Play Console review. Never put a keystore password or private signing key in source control.
-
-## Quality checks
-
-A green GitHub Action proves that its workflow steps completed. It does not prove every provider integration works on a real account/device. Test login, file uploads, Firestore reads/writes, API-backed views, Gmail scopes, and Android WebView behavior on actual devices before calling the release production-ready.
+1. Build the production web assets and copy them into the Android assets folder:
+   ```bash
+   npm run build
+   rm -rf android/app/src/main/assets/dist
+   mkdir -p android/app/src/main/assets/dist
+   cp -r dist/* android/app/src/main/assets/dist/
+   ```
+2. Compile the Debug APK with Gradle (requires JDK 17 and Android SDK 35):
+   ```bash
+   cd android
+   ./gradlew assembleDebug --no-daemon
+   ```
+   The resulting APK is generated at `android/app/build/outputs/apk/debug/app-debug.apk`.

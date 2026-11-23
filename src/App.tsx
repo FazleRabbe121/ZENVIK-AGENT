@@ -52,6 +52,7 @@ import { InterviewAdminView } from './views/InterviewAdminView';
 import { PersonalAIView } from './views/PersonalAIView';
 import { CertificateGeneratorView } from './views/CertificateGeneratorView';
 import { AppsCenterView } from './views/AppsCenterView';
+import { GmailIntegrationView } from './views/GmailIntegrationView';
 import {
   CertificatePreselection,
   setPendingCertificatePreselection,
@@ -68,6 +69,7 @@ import { FamilyMoneyModal } from './components/FamilyMoneyModal';
 import { RecipeModal } from './components/RecipeModal';
 import { AIReportModal } from './components/AIReportModal';
 import { EducationalUrgeGuide } from './components/EducationalUrgeGuide';
+import { AndroidExportModal } from './components/AndroidExportModal';
 import { DeveloperGateModal, AppAccessLevel } from './components/DeveloperGateModal';
 import { useTheme } from './context/ThemeContext';
 
@@ -169,6 +171,7 @@ export default function App() {
   const [editingRecipe, setEditingRecipe] = useState<RecipeRecord | null>(null);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isUrgeGuideOpen, setIsUrgeGuideOpen] = useState(false);
+  const [isAndroidExportOpen, setIsAndroidExportOpen] = useState(false);
 
   // Network connectivity listener
   useEffect(() => {
@@ -945,8 +948,6 @@ export default function App() {
             />
           )}
 
-          {currentTab === 'apps-center' && <AppsCenterView />}
-
           {/* 1b. Personal AI Workspace (Isolated CareerPilot AI Agent Engineer System) */}
           {currentTab === 'personal-ai' && (
             <PersonalAIView
@@ -1046,6 +1047,13 @@ export default function App() {
           {/* 14. Rejected Applications & Reapply Later */}
           {currentTab === 'rejected-reapply' && (
             <RejectedApplicationsView />
+          )}
+
+          {/* 14b. Apps & Installation Center */}
+          {currentTab === 'apps-center' && (
+            <AppsCenterView
+              onOpenLegacyModal={() => setIsAndroidExportOpen(true)}
+            />
           )}
 
           {/* 15. Profile & Settings */}
@@ -1188,6 +1196,10 @@ export default function App() {
               currency={appState.settings.currency || '$'}
             />
           )}
+
+          {currentTab === 'gmail-integration' && (
+            <GmailIntegrationView onBack={() => setCurrentTab('dashboard')} />
+          )}
           </>
         )}
         </main>
@@ -1285,6 +1297,12 @@ export default function App() {
         />
       )}
 
+      {isAndroidExportOpen && (
+        <AndroidExportModal
+          isOpen={isAndroidExportOpen}
+          onClose={() => setIsAndroidExportOpen(false)}
+        />
+      )}
     </div>
   );
 }

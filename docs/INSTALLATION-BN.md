@@ -1,106 +1,68 @@
-# ZENVIK-AGENT — বাংলা ইনস্টলেশন ও ব্যবহার নির্দেশিকা
+# ZENVIK-AGENT — বিস্তারিত ইনস্টলেশন গাইড (Bengali Installation Guide)
 
-এই গাইডে Android APK, মোবাইল Web App (PWA), Desktop এবং GitHub থেকে আপডেট নেওয়ার নিয়ম দেওয়া হয়েছে।
+এই গাইডে **ZENVIK-AGENT** অ্যাপটি Android ফোন, iPhone (iOS), Windows পিসি এবং Mac-এ ইনস্টল করার সম্পূর্ণ ধাপগুলো বাংলায় দেওয়া হলো।
 
-## ১. Apps & Installation Center কোথায়?
+---
 
-ZENVIK-AGENT খুলে:
-- Desktop: বাম পাশের Sidebar-এ **Apps & Installation Center** নির্বাচন করুন।
-- Mobile: নিচের Navigation Bar-এ **Apps** অথবা উপরের **Apps** শর্টকাট নির্বাচন করুন।
+## ১. Android ফোনে সরাসরি APK ইনস্টল (Recommended for Android)
 
-এই পেজ থেকে APK, Web App install instructions, GitHub Actions, Documentation এবং Update information পাওয়া যাবে।
+১. আপনার ফোন থেকে অ্যাপের **Apps & Installation Center** ওপেন করুন অথবা সরাসরি নিচের লিংকে যান:
+   - [ZENVIK-AGENT-debug.apk ডাউনলোড করুন](https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/latest/download/ZENVIK-AGENT-debug.apk)
+২. ডাউনলোড শেষ হলে নোটিফিকেশন বার বা **Downloads** ফোল্ডার থেকে `ZENVIK-AGENT-debug.apk` ফাইলটিতে ট্যাপ করুন।
+৩. যদি আপনার ফোনে **"For your security, your phone currently isn't allowed to install unknown apps"** মেসেজ দেখায়:
+   - **Settings**-এ ট্যাপ করুন।
+   - **Allow from this source** সুইচটি অন করুন।
+৪. **Install** বাটনে ট্যাপ করুন।
+৫. যদি Google Play Protect থেকে **"Unrecognized app developer"** ওয়ার্নিং দেখায় (যেহেতু এটি সরাসরি গিটহাব ডিবাগ বিল্ড), তাহলে **More details** -> **Install anyway**-তে ট্যাপ করুন।
 
-## ২. Android APK ইনস্টল
+---
 
-**সর্বশেষ APK:** [ZENVIK-AGENT-Android.apk ডাউনলোড](https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/download/android-latest/ZENVIK-AGENT-Android.apk)
+## ২. Android ফোনে ব্রাউজার থেকে PWA ইনস্টল (কোনো APK ছাড়াই)
 
-1. Android ফোনে উপরের APK লিংক খুলে ফাইল ডাউনলোড করুন।
-2. ডাউনলোড শেষ হলে APK ফাইলটি খুলুন।
-3. Android অনুমতি চাইলে Browser বা Files-এর জন্য **Allow from this source / Install unknown apps** চালু করুন।
-4. ফিরে এসে **Install** চাপুন।
-5. ইনস্টল শেষ হলে ZENVIK-AGENT খুলুন এবং ইন্টারনেট সংযোগ রাখুন।
+১. **Google Chrome** ব্রাউজারে অ্যাপের ওয়েব লিংকটি ওপেন করুন:
+   - `https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app`
+২. মেনু থেকে **Apps & Installation Center**-এ যান এবং **Install Web App Now** বাটনে ট্যাপ করুন।
+৩. বিকল্পভাবে, Chrome-এর উপরে ডানপাশে তিন ডট (`⋮`) মেনুতে ট্যাপ করে **Install app** বা **Add to Home screen** সিলেক্ট করুন।
 
-এই প্রকল্পের Android build বর্তমানে Debug APK তৈরি করে। এটি পরীক্ষা ও সরাসরি ইনস্টলেশনের জন্য। Play Store প্রকাশের জন্য আলাদা production signing key এবং release configuration প্রয়োজন।
+---
 
-### আপডেট করার সময়
+## ৩. iPhone ও iPad (iOS)-এ ইনস্টল করার নিয়ম
 
-APK হলো bundled native package; GitHub-এ কোড পরিবর্তন করলেই ফোনের ইনস্টল করা APK নিজে থেকে বদলায় না।
+অ্যাপল (iOS) ডিভাইসে `.apk` ফাইল চলে না। iPhone বা iPad-এ নেটিভ ফুল-স্ক্রিন অ্যাপ হিসেবে ব্যবহার করতে:
 
-1. নতুন কোড main branch-এ push হলে Android workflow চালু হয় (পরিবর্তিত ফাইল workflow-এর trigger path-এর মধ্যে থাকতে হবে)।
-2. Build সফল হলে GitHub Release-এর android-latest asset আপডেট হয়।
-3. Apps Center বা উপরের Latest APK লিংক থেকে নতুন APK ডাউনলোড করুন।
-4. একই signing certificate হলে Android পুরোনো ইনস্টলেশনের ওপর update করতে পারে। GitHub-hosted Debug build-এ runner-এর debug signing key বদলে গেলে update ব্যর্থ হতে পারে; সে ক্ষেত্রে পুরোনো Debug app uninstall করে নতুন APK install করতে হবে। Uninstall করলে local-only app data মুছে যেতে পারে; আগে cloud sync/backup নিশ্চিত করুন।
+১. অবশ্যই **Safari** ব্রাউজারে অ্যাপের ওয়েব লিংকটি ওপেন করুন।
+২. স্ক্রিনের নিচে মাঝখানে থাকা **Share** আইকনে (উপরে তীর চিহ্ন দেওয়া বক্স) ট্যাপ করুন।
+৩. মেনুতে নিচে স্ক্রল করে **Add to Home Screen** অপশনটিতে ট্যাপ করুন।
+৪. উপরে ডানপাশে **Add** বাটনে ট্যাপ করুন। এখন আপনার হোম স্ক্রিনে ZENVIK আইকন চলে আসবে।
 
-## ৩. Android Chrome থেকে Web App ইনস্টল (PWA)
+---
 
-PWA আলাদা APK নয়। এটি ওয়েবসাইটকে Home Screen-এ app-এর মতো খুলতে দেয়।
+## ৪. Windows 10/11 ও macOS কম্পিউটারে ডেস্কটপ অ্যাপ হিসেবে ইনস্টল
 
-1. Chrome দিয়ে [ZENVIK-AGENT Web App](https://fazlerabbe121.github.io/ZENVIK-AGENT/) খুলুন।
-2. Chrome-এর উপরের ডানদিকে **⋮** মেনু চাপুন।
-3. **Install app** অথবা **Add to Home screen** নির্বাচন করুন।
-4. Install / Add চাপুন।
-5. Home Screen-এ ZENVIK আইকন থেকে খুলুন।
+১. কম্পিউটারে **Google Chrome** বা **Microsoft Edge** ব্রাউজারে অ্যাপটি ওপেন করুন।
+২. অ্যাপের ভেতরে **Apps & Installation Center**-এ গিয়ে **Install Web App Now** বাটনে ক্লিক করুন।
+৩. অথবা ব্রাউজারের অ্যাড্রেস বারের (URL বারের) ডানপাশে থাকা ছোট কম্পিউটার/ডাউনলোড আইকনে ক্লিক করে **Install** চাপুন।
+৪. এটি আপনার স্টার্ট মেনু (Windows) বা Applications ফোল্ডার (Mac)-এ যুক্ত হয়ে যাবে।
 
-Browser, Android version এবং site installability অনুযায়ী মেনুর শব্দ ভিন্ন হতে পারে। **Install app** না দেখালে Chrome আপডেট করুন, সাইটটি HTTPS-এ খুলুন, তারপর browser menu থেকে **Add to Home screen** চেষ্টা করুন।
+---
 
-## ৪. iPhone / iPad
+## ৫. Windows কম্পিউটার ও USB ক্যাবল দিয়ে নিজের ফোনে APK বিল্ড ও ইনস্টল
 
-1. Safari-তে Web App URL খুলুন।
-2. **Share** বাটন চাপুন।
-3. **Add to Home Screen** নির্বাচন করুন।
-4. নাম যাচাই করে **Add** চাপুন।
+আপনি যদি নিজের কম্পিউটার থেকে সোর্স কোড কম্পাইল করে সরাসরি ফোনে ইনস্টল করতে চান:
 
-iOS-এ এটি Home Screen web app; Android APK ইনস্টল হয় না।
+১. অ্যাপের **Apps & Installation Center** থেকে **Download Full Project (.ZIP)** বাটনে ক্লিক করে জিপ ফাইলটি নামিয়ে আনজিপ করুন।
+২. প্রথমবার সেটআপের জন্য `SETUP_ANDROID_ENVIRONMENT.bat` ফাইলটিতে ডাবল-ক্লিক করুন।
+৩. ফোনে **Developer Options** -> **USB Debugging** চালু করে USB ক্যাবল দিয়ে পিসিতে কানেক্ট করুন।
+৪. `CHECK_ANDROID_DEVICE.bat` চালিয়ে ফোনটি কানেক্ট হয়েছে কিনা নিশ্চিত করুন।
+৫. `BUILD_AND_INSTALL.bat`-এ ডাবল-ক্লিক করুন—এটি ওয়েব অ্যাপ বিল্ড করে স্বয়ংক্রিয়ভাবে আপনার ফোনে APK ইনস্টল করে দেবে।
 
-## ৫. Windows / macOS Desktop
+---
 
-এখন আলাদা native Windows EXE বা macOS DMG installer প্রকাশ করা হয় না।
+## ৬. Gmail OAuth "Access Blocked / Error 403" সমস্যার সমাধান
 
-1. Chrome বা Edge-এ Web App URL খুলুন।
-2. Address bar-এর Install icon অথবা browser menu → **Install ZENVIK-AGENT** নির্বাচন করুন।
-3. Desktop/Start Menu shortcut থেকে খুলুন।
+Gmail কানেক্ট করার সময় যদি Google থেকে **Access blocked: This app's request is invalid** বা **Error 403: access_denied** দেখায়:
 
-## ৬. Web App এবং APK Update-এর পার্থক্য
-
-| ধরন | Update পদ্ধতি |
-|---|---|
-| Website | GitHub Pages deployment সফল হলে নতুন website files publish হয় |
-| Installed PWA | Internet-এ reconnect করে app refresh/reopen করলে নতুন published website load হয় |
-| Android APK | নতুন APK build করে download ও install করতে হয়; automatic silent update নেই |
-
-এই Android wrapper bundled dist files চালায়। তাই APK নিজে থেকে GitHub-এর সঙ্গে code update sync করে না।
-
-## ৭. GitHub-এ কোড পরিবর্তন
-
-Repository: https://github.com/FazleRabbe121/ZENVIK-AGENT
-
-1. GitHub-এ repository খুলুন।
-2. main branch-এ পরিবর্তন commit/push করুন।
-3. **Actions** ট্যাবে যান।
-4. **Deploy to GitHub Pages** workflow website publish করে।
-5. Source, public assets, Android files বা build workflow-এর পরিবর্তনে **Build ZENVIK Android APK** workflow চালু হয়।
-6. Android Build সফল হলে workflow summary-তে **Success** এবং **Artifacts: 1** দেখতে পাবেন। Release asset-ও আপডেট হবে।
-
-### “Not published” মানে কী?
-
-GitHub Actions summary-র **Build Scan: Not published** মানে Gradle Build Scan report প্রকাশ হয়নি। এটি APK publish না হওয়ার প্রমাণ নয়। APK যাচাই করতে **Build Outcome**, **Artifacts**, এবং android-latest Release দেখুন।
-
-## ৮. পরিচিত প্রযুক্তিগত তথ্য
-
-- Android package ID (release): com.ccd.abetteryou
-- Debug APK application ID: com.ccd.abetteryou.debug
-- Minimum Android version: Android 8.0 / API 26
-- App version in Android Gradle config: 1.0.0
-- Launcher icon, adaptive icon এবং splash styling Android resources-এ নির্ধারিত।
-- Google sign-in, Firebase, cloud storage, AI APIs, Gmail/Drive এবং backend-dependent features-এর জন্য সঠিক provider configuration, authorization, security rules এবং online backend প্রয়োজন।
-
-## ৯. সমস্যা হলে
-
-- **কালো/ফাঁকা স্ক্রিন:** Android System WebView ও Chrome আপডেট করুন; ইন্টারনেট পরীক্ষা করুন; Apps Center থেকে সর্বশেষ APK ব্যবহার করুন।
-- **APK install blocked:** Android Settings-এ Browser/Files-এর Install unknown apps অনুমতি দিন।
-- **APK update rejected:** আগের Debug APK uninstall করে নতুনটি install করুন; আগে cloud backup নিশ্চিত করুন।
-- **Google login fail:** Firebase Authentication-এ সঠিক Authorized Domains, Google provider এবং OAuth configuration পরীক্ষা করতে হবে।
-- **Cloud data না আসে:** Firebase project, Firestore rules, network এবং signed-in account পরীক্ষা করতে হবে।
-- **AI/API feature fail:** server-side API secret ও backend host configuration পরীক্ষা করুন। Browser bundle-এ private API key রাখবেন না।
-
-কোনো feature-কে verified বলা যাবে শুধু বাস্তবে test পাস করার পর।
+১. [Google Cloud Console](https://console.cloud.google.com/apis/credentials/consent)-এ যান।
+২. **OAuth consent screen** থেকে **Test users** সেকশনে আপনার ইমেইল (`fazle.rabbe.doc@gmail.com` এবং যে ইমেইল দিয়ে লগইন করছেন) যোগ করুন।
+৩. **APIs & Services -> Library** থেকে **Gmail API** Enable করা আছে কিনা নিশ্চিত করুন।
+৪. **Credentials -> OAuth 2.0 Client IDs**-এ আপনার ওয়েব অ্যাপের ডোমেইন (`https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app` এবং `https://ais-dev-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app`) **Authorized JavaScript origins** ও **Authorized redirect URIs**-এ যুক্ত করুন।

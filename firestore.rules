@@ -17,26 +17,31 @@ service cloud.firestore {
     }
 
     function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-+.@]+$');
     }
 
     // Test connection doc used to verify database connectivity
     match /test/connection {
-      allow read: if true;
+      allow get: if true;
+      allow list, write: if false;
     }
 
-    // Dynamic CV Users & Accounts (Legacy compatibility)
+    // Dynamic CV Users & Accounts (CV-Only Workspace compatibility with enumeration & deletion protection)
     match /cv_accounts/{accountId} {
-      allow read, write: if true;
+      allow get, create, update: if isValidId(accountId);
+      allow list, delete: if isSignedIn() && isValidId(accountId);
       match /{subcollection=**} {
-        allow read, write: if true;
+        allow get, create, update: if isValidId(accountId);
+        allow list, delete: if isSignedIn() && isValidId(accountId);
       }
     }
 
     match /cv_users/{phoneNumber} {
-      allow read, write: if true;
+      allow get, create, update: if isValidId(phoneNumber);
+      allow list, delete: if isSignedIn() && isValidId(phoneNumber);
       match /{subcollection=**} {
-        allow read, write: if true;
+        allow get, create, update: if isValidId(phoneNumber);
+        allow list, delete: if isSignedIn() && isValidId(phoneNumber);
       }
     }
 
@@ -45,7 +50,7 @@ service cloud.firestore {
     match /users/{userId} {
       allow read, write: if isOwner(userId) && isValidId(userId);
 
-      // All subcollections (workspace, cvLibrary, savedJobs, applications, gmailQueue, settings, etc.)
+      // All subcollections (workspace, cvLibrary, cvDocuments, savedJobs, applications, gmailQueue, settings, relapses, finance, familyMoney, recipes, reports, interviewAttempts)
       match /{allSubcollections=**} {
         allow read, write: if isOwner(userId) && isValidId(userId);
       }

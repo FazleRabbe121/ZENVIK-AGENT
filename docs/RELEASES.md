@@ -1,47 +1,42 @@
-# Releases and Troubleshooting
+# ZENVIK-AGENT — Releases, CI/CD & Deployment (`RELEASES.md`)
 
-## Android build workflow
+This document describes the automated build, release, and deployment pipelines for **ZENVIK-AGENT**.
 
-Open [Build ZENVIK Android APK](https://github.com/FazleRabbe121/ZENVIK-AGENT/actions/workflows/build-android-apk.yml).
+---
 
-A run is successful when:
-- The workflow run shows **Success**.
-- The Android job's **Build debug APK** step succeeds.
-- The summary shows one uploaded artifact.
-- The workflow completes its direct-release upload step.
+## 1. Version & Package Metadata
 
-## Download locations
+- **Version Name**: `1.0.0`
+- **Android Version Code**: `1`
+- **Production Package ID**: `com.ccd.abetteryou`
+- **Debug Package ID**: `com.ccd.abetteryou.debug`
+- **Supported Android Versions**: Android 8.0 (`minSdk 26`) through Android 15 (`targetSdk 35`)
+- **Latest Debug APK URL**:
+  `https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/latest/download/ZENVIK-AGENT-debug.apk`
 
-- [Latest direct APK file](https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/download/android-latest/ZENVIK-AGENT-Android.apk)
-- [Latest release page](https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/tag/android-latest)
-- [Workflow run history](https://github.com/FazleRabbe121/ZENVIK-AGENT/actions)
+---
 
-The Actions artifact is a ZIP archive containing the APK. The android-latest Release provides the APK as a direct download asset for the Apps Center.
+## 2. Automated Android APK Workflow (`.github/workflows/build-android-apk.yml`)
 
-## What “Not published” means
+Triggered automatically on every push to `main` or `master`, on pull requests, or manually via `workflow_dispatch`:
 
-The Gradle Build Scan field can say **Not published** even when the APK build succeeds. It means no Gradle Build Scan report was published. Check the workflow build outcome and APK artifact/release instead.
+1. **Checkout & Node 20 Setup**: Installs dependencies via `npm install`.
+2. **Quality Gate**: Runs `npm run lint` (`tsc --noEmit`) and `npm test` (Node test runner).
+3. **Web Bundle Packaging**: Runs `npm run build` and copies `dist/*` into `android/app/src/main/assets/dist/`.
+4. **Android Compilation**: Sets up JDK 17 (Temurin) and Gradle 8.10.2, then runs `./gradlew assembleDebug --no-daemon --stacktrace`.
+5. **Artifact Upload**: Uploads `ZENVIK-AGENT-debug.apk` as a downloadable workflow artifact (`ZENVIK-AGENT-Android-Debug-APK`).
+6. **GitHub Release Publishing**: On pushes to `main`/`master`, automatically creates or updates the `v1.0.0-debug` release using `softprops/action-gh-release@v2` and attaches `ZENVIK-AGENT-debug.apk` and `app-debug.apk` so the `/releases/latest/download/ZENVIK-AGENT-debug.apk` link always serves the newest build.
 
-## Web release
+---
 
-The Pages workflow is separate from the Android build. It publishes the static web frontend. It does not run the Express backend in server.ts.
+## 3. GitHub Pages Deployment Workflow (`.github/workflows/deploy.yml`)
 
-## Updating an installed app
+Triggered on pushes to `main` or `workflow_dispatch`:
 
-- PWA: refresh/reopen while online after the Pages workflow has deployed.
-- Android APK: download and install the newest APK. Android may refuse an in-place update when the signing certificate differs. The current CI build is debug-signed; if that happens, back up/sync data and uninstall the previous debug APK before installing the new one.
-- A GitHub push does not silently update a bundled APK already installed on a phone.
+1. **Quality Gate**: Runs `npm install`, `npm run lint`, and `npm test`.
+2. **Static SPA Build**: Runs `npm run build` with `VITE_BASE_PATH` configured automatically for the repository (`/${repo_name}/`), copies `dist/index.html` to `dist/404.html` for client-side SPA routing fallback, and creates `dist/.nojekyll`.
+3. **Deploy**: Publishes `dist/` to GitHub Pages via `actions/deploy-pages@v4`.
 
-## Common failures
-
-| Symptom | What to inspect |
-|---|---|
-| Build failed before Gradle | Node dependency installation and Vite build logs |
-| Unresolved reference in Kotlin | Native Android imports vs dependencies in android/app/build.gradle.kts |
-| Missing Android resource | Manifest references vs android/app/src/main/res/ files |
-| App opens to blank screen | WebView asset origin, WebViewAssetLoader, relative asset paths, and browser console/runtime errors |
-| Google sign-in fails | Firebase Auth provider, authorized domains, OAuth client setup, WebView/browser restrictions |
-| Cloud records missing | Firebase project, Auth UID, Firestore rules, network, and read/write logs |
-| AI/Gmail/server feature fails | Backend deployment, API credentials, provider authorization, and required OAuth scopes |
-
-Do not treat a successful APK compilation as proof of runtime integrations. Verify on a physical Android device using the actual user account and test data.
+### Important Note: Static GitHub Pages vs. Express Backend Routes
+- **GitHub Pages** hosts static frontend files (`dist/`) only. Client-side features backed by Firebase Firestore, local storage, Recipe Book static data, and browser-direct Gmail OAuth work directly on GitHub Pages.
+- **Server-side Express endpoints** (`/api/ai/*`, `/api/jobs/discover`, `/api/interview/*`, `/api/personal-ai/*`, `/api/download-project`) require a running Node.js runtime (`server.ts`), such as the live Google Cloud Run deployment (`https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app`).

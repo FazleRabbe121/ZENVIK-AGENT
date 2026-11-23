@@ -123,6 +123,40 @@
         "passFailStatus": { "type": "string", "maxLength": 64 }
       },
       "required": ["attemptId", "participantEmail", "participantUid", "role", "level", "status", "startedAt"]
+    },
+    "GmailConnectionRecord": {
+      "title": "GmailConnectionRecord",
+      "description": "Per-user personal Gmail OAuth 2.0 connection status and encrypted token metadata segregated by UID",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "gmailAddress": { "type": "string", "maxLength": 256 },
+        "status": { "type": "string", "maxLength": 32 },
+        "requiredScope": { "type": "string", "maxLength": 128 },
+        "sentTodayCount": { "type": "number" },
+        "dailyLimit": { "type": "number" },
+        "connectedAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "gmailAddress", "status"]
+    },
+    "EmailSendingHistoryRecord": {
+      "title": "EmailSendingHistoryRecord",
+      "description": "Per-user isolated Gmail application delivery record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "senderGmail": { "type": "string", "maxLength": 256 },
+        "recipientEmail": { "type": "string", "maxLength": 256 },
+        "subject": { "type": "string", "maxLength": 512 },
+        "cvId": { "type": "string", "maxLength": 128 },
+        "cvFilename": { "type": "string", "maxLength": 256 },
+        "status": { "type": "string", "maxLength": 32 },
+        "gmailMessageId": { "type": "string", "maxLength": 128 },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "userId", "senderGmail", "recipientEmail", "status", "timestamp"]
     }
   },
   "firestore": {
@@ -153,6 +187,14 @@
     "/users/{userId}/interviewAttempts/{attemptId}": {
       "schema": "InterviewAttemptRecord",
       "description": "Participant interview attempts and scorecards segregated by UID"
+    },
+    "/users/{userId}/gmailConnection/{connectionId}": {
+      "schema": "GmailConnectionRecord",
+      "description": "Per-user personal Gmail OAuth connection status segregated by UID"
+    },
+    "/users/{userId}/emailHistory/{emailId}": {
+      "schema": "EmailSendingHistoryRecord",
+      "description": "Per-user personal Gmail sending history segregated by UID"
     }
   }
 }

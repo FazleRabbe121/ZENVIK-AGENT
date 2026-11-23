@@ -1,29 +1,39 @@
-# ZENVIK-AGENT backend + web frontend for Google Cloud Run.
-# Node runs the Express API; Python runs the existing JobHunter bridge.
-FROM node:22-bookworm-slim
-
-ENV NODE_ENV=production \
-    PORT=8080 \
-    PYTHONUNBUFFERED=1
+# ZENVIK AGENT — Google Cloud Run Production Dockerfile (Node 20 Alpine)
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Install dependencies
+COPY package.json package-lock.json* ./
+RUN npm install --legacy-peer-deps
 
-COPY package.json ./
-RUN npm install --no-audit --no-fund
-
-COPY jobhunter-agent/requirements.txt ./jobhunter-agent/requirements.txt
-RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir -r jobhunter-agent/requirements.txt
-ENV PATH="/opt/venv/bin:$PATH"
-
+# Copy application source and build static frontend bundle
 COPY . .
+RUN npm run build
 
-# Cloud Run serves the React app and its /api routes from one HTTPS origin.
-RUN VITE_BASE_PATH=/ npm run build
+# Production Runner Stage
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=8080
+
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/src ./src
+COPY --from=builder /app/server.ts ./server.ts
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
+COPY --from=builder /app/firebase-applet-config.json ./firebase-applet-config.json
+COPY --from=builder /app/data ./data
+
+# Ensure writable data directory for Cloud Run volume / ephemeral state
+RUN mkdir -p /app/data
 
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:${PORT:-8080}/api/health || exit 1
+
 CMD ["npm", "start"]

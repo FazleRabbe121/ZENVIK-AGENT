@@ -1,22 +1,55 @@
-ZENVIK-AGENT — বাংলা ডকুমেন্টেশন
+================================================================================
+ZENVIK-AGENT — AI Career & Employment Platform (বাংলা নির্দেশিকা / Bengali Guide)
+================================================================================
 
-সম্পূর্ণ বাংলা ইনস্টলেশন ও আপডেট গাইড:
-https://github.com/FazleRabbe121/ZENVIK-AGENT/blob/main/docs/INSTALLATION-BN.md
+স্বাগতম! ZENVIK-AGENT হলো আপনার সম্পূর্ণ AI ক্যারিয়ার, ইউরোপ ও সাইপ্রাস জব সার্চ,
+ভিসা স্পন্সরশিপ চাকরি খোঁজা, অটোমেটেড জিমেইল (Gmail) জব অ্যাপ্লিকেশন, সিভি ও কভার
+লেটার ম্যানেজার, AI ইন্টারভিউ প্রস্তুতি এবং দৈনন্দিন রুটিন ও ফাইন্যান্স ট্র্যাকিং প্ল্যাটফর্ম।
 
-ডকুমেন্টেশন সূচি:
-https://github.com/FazleRabbe121/ZENVIK-AGENT/tree/main/docs
+--------------------------------------------------------------------------------
+১. প্রয়োজনীয় লিংকসমূহ (Official Links)
+--------------------------------------------------------------------------------
+* ওয়েব অ্যাপ (Production App):
+  https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app
 
-সর্বশেষ Android APK:
-https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/download/android-latest/ZENVIK-AGENT-Android.apk
+* গিটহাব রিপোজিটরি (GitHub Repository):
+  https://github.com/FazleRabbe121/ZENVIK-AGENT
 
-Android Build History:
-https://github.com/FazleRabbe121/ZENVIK-AGENT/actions/workflows/build-android-apk.yml
+* অ্যান্ড্রয়েড APK ডাউনলোড (Direct Android Debug APK):
+  https://github.com/FazleRabbe121/ZENVIK-AGENT/releases/latest/download/ZENVIK-AGENT-debug.apk
 
-Repository:
-https://github.com/FazleRabbe121/ZENVIK-AGENT
+--------------------------------------------------------------------------------
+২. মোবাইলে ও কম্পিউটারে ইনস্টল করার নিয়ম (Installation Guide)
+--------------------------------------------------------------------------------
 
-দ্রষ্টব্য:
-- Android APK GitHub Actions থেকে build হয়।
-- GitHub-এ code update করলে নতুন APK তৈরি হয়; ফোনে থাকা APK নিজে থেকে silently update হয় না।
-- Installed PWA website deployment-এর পর reload করলে নতুন web build পায়।
-- বর্তমান Android workflow Debug APK তৈরি করে; এটি Play Store production signing নয়।
+[A] Android ফোনে APK ইনস্টল:
+১. উপরের ডাউনলোড লিংক থেকে অথবা অ্যাপের ভেতরে "Apps & Installation Center" থেকে
+   "Download Android APK" বাটনে ক্লিক করে `ZENVIK-AGENT-debug.apk` ডাউনলোড করুন।
+২. ফাইলটি ওপেন করুন। ফোনে "Install unknown apps" বা "Unknown sources" পারমিশন চাইলে
+   Allow করে দিন।
+৩. Install বাটনে ট্যাপ করুন এবং অ্যাপটি ওপেন করুন।
+
+[B] Android ফোনে PWA (হোম স্ক্রিন অ্যাপ) ইনস্টল:
+১. Google Chrome ব্রাউজারে ওয়েব অ্যাপ লিংকটি ওপেন করুন।
+২. সাইডবার থেকে "Apps & Installation Center"-এ যান এবং "Install Web App Now"-এ ট্যাপ করুন
+   (অথবা ব্রাউজারের উপরে ডানপাশের ⋮ মেনু থেকে "Install app" সিলেক্ট করুন)।
+
+[C] iPhone / iPad (iOS)-এ ইনস্টল:
+১. Safari ব্রাউজারে ওয়েব অ্যাপ লিংকটি ওপেন করুন।
+২. নিচের Share বাটনে (উপরে তীর চিহ্ন দেওয়া বক্স) ট্যাপ করুন।
+৩. নিচে স্ক্রল করে "Add to Home Screen" সিলেক্ট করুন এবং উপরে ডানপাশে "Add" ট্যাপ করুন।
+
+[D] Windows ও macOS কম্পিউটারে ইনস্টল:
+১. Google Chrome বা Microsoft Edge ব্রাউজারে অ্যাপটি ওপেন করুন।
+২. অ্যাড্রেস বারের ডানপাশে থাকা Install আইকনে ক্লিক করুন অথবা "Apps & Installation Center"
+   থেকে "Install Web App Now" বাটনে ক্লিক করুন।
+
+--------------------------------------------------------------------------------
+৩. লগইন ও পাসকোড (Access & Passcodes)
+--------------------------------------------------------------------------------
+* মূল অ্যাপ পাসকোড (Full Platform Access): 89056
+* সিভি-অনলি মোড পাসকোড (CV Builder Only Mode): 00000
+* অ্যাডমিন ইমেইল (Admin Access): fazle.rabbe.doc@gmail.com
+
+বিস্তারিত বাংলা গাইডের জন্য দেখুন: docs/INSTALLATION-BN.md
+================================================================================
