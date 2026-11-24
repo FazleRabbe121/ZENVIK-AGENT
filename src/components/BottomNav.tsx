@@ -48,7 +48,6 @@ export const BottomNav: React.FC<BottomNavProps> = ({
     { id: 'cv-library', label: 'CV', icon: FileText },
     { id: 'gmail-center', label: 'Apply', icon: Mail },
     { id: 'application-history', label: 'History', icon: Clock },
-    { id: 'apps-center', label: 'Apps', icon: Smartphone },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
