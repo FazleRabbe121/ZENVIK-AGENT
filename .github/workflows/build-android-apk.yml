@@ -27,7 +27,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          # No npm lockfile is committed yet; skip setup-node's lockfile cache lookup.
 
       - name: Install Frontend & Backend Dependencies
         run: npm install
