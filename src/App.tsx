@@ -53,6 +53,7 @@ import { PersonalAIView } from './views/PersonalAIView';
 import { CertificateGeneratorView } from './views/CertificateGeneratorView';
 import { AppsCenterView } from './views/AppsCenterView';
 import { GmailIntegrationView } from './views/GmailIntegrationView';
+import { EnglishLearningView } from './views/EnglishLearningView';
 import {
   CertificatePreselection,
   setPendingCertificatePreselection,
@@ -1199,6 +1200,10 @@ export default function App() {
 
           {currentTab === 'gmail-integration' && (
             <GmailIntegrationView onBack={() => setCurrentTab('dashboard')} />
+          )}
+
+          {currentTab === 'english-master' && (
+            <EnglishLearningView userId={user?.uid} />
           )}
           </>
         )}

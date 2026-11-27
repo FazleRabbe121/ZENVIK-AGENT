@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -13,7 +13,8 @@ import { aiCooperativeEngine } from './src/server/aiCooperativeEngine.js';
 import { personalAIChatRouter } from './src/server/personalAIChatEngine.js';
 import { recipeBookRouter } from './src/server/recipeBookServer.js';
 import { pythonJobHunterBridge } from './src/server/pythonJobHunterBridge.js';
-import { defaultMultiUserSaaS } from './src/server/multiUserSaaSServer.js';
+import { defaultMultiUserSaaS, verifySessionToken, ADMIN_EMAIL_ALLOWLIST } from './src/server/multiUserSaaSServer.js';
+import { englishLearningRouter } from './src/server/englishLearningServer.js';
 
 dotenv.config();
 
@@ -27,21 +28,85 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
 
 const cliArgs = process.argv.slice(2);
 const portFlagIdx = cliArgs.indexOf('--port');
 const hostFlagIdx = cliArgs.indexOf('--host');
 
-// Cloud Run injects PORT. Keep CLI override for local diagnostics.
+// Cloud Run injects PORT=8080 in production; AI Studio dev runtime uses port 3000.
+const defaultPort = process.env.NODE_ENV === 'production' ? 8080 : 3000;
 const PORT = portFlagIdx !== -1 && cliArgs[portFlagIdx + 1]
   ? parseInt(cliArgs[portFlagIdx + 1], 10)
-  : (process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.APP_PORT ? parseInt(process.env.APP_PORT, 10) : 8080));
+  : (process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.APP_PORT ? parseInt(process.env.APP_PORT, 10) : defaultPort));
 
 const HOST = hostFlagIdx !== -1 && cliArgs[hostFlagIdx + 1]
   ? cliArgs[hostFlagIdx + 1]
   : '0.0.0.0';
 
+// Safe HTTP Security Headers (iframe-compatible: intentionally omits X-Frame-Options)
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
+
+// Sliding-Window API Rate Limiter (protects auth, Gmail send, and AI endpoints from abuse)
+const apiRateBuckets = new Map<string, { count: number; resetAt: number }>();
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const now = Date.now();
+  const isSensitiveRoute =
+    req.path.startsWith('/multiuser/auth/') ||
+    req.path.startsWith('/gmail/send');
+  const limit = isSensitiveRoute ? 40 : 240;
+  const windowMs = 60_000;
+  const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+  const bucketKey = `${isSensitiveRoute ? 'auth' : 'api'}:${clientIp}`;
+
+  let entry = apiRateBuckets.get(bucketKey);
+  if (!entry || now >= entry.resetAt) {
+    entry = { count: 0, resetAt: now + windowMs };
+  }
+  entry.count += 1;
+  apiRateBuckets.set(bucketKey, entry);
+
+  // Prevent unbounded memory growth under IP churn
+  if (apiRateBuckets.size > 5000) {
+    for (const [k, v] of apiRateBuckets.entries()) {
+      if (now >= v.resetAt) apiRateBuckets.delete(k);
+    }
+  }
+
+  const remaining = Math.max(0, limit - entry.count);
+  res.setHeader('X-RateLimit-Limit', String(limit));
+  res.setHeader('X-RateLimit-Remaining', String(remaining));
+  res.setHeader('X-RateLimit-Reset', String(Math.ceil(entry.resetAt / 1000)));
+
+  if (entry.count > limit) {
+    return res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many requests. Please wait a moment and try again.',
+    });
+  }
+  next();
+});
+
+// Structured API Access Logger (never logs Authorization headers, tokens, or request bodies)
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const durationMs = Date.now() - startedAt;
+    if (res.statusCode >= 400) {
+      console.warn(`[API] ${req.method} ${req.originalUrl.split('?')[0]} -> ${res.statusCode} (${durationMs}ms)`);
+    }
+  });
+  next();
+});
 
 // Cloud Run startup/liveness probe. This intentionally does not expose secrets or provider details.
 app.get('/healthz', (_req: Request, res: Response) => {
@@ -225,11 +290,20 @@ ${Object.entries(stats?.expenses?.byCategory || {})
 
 // Download Complete Project Zip Route (For GitHub / Local / Android build)
 app.get('/api/export/project-zip', (req: Request, res: Response) => {
-  const zipPath = path.join(__dirname, 'public', 'ccd-hospitality-full-project.zip');
-  if (fs.existsSync(zipPath)) {
+  const completeZipPath = path.join(__dirname, 'public', 'zenvik-agent-complete-project.zip');
+  const legacyZipPath = path.join(__dirname, 'public', 'ccd-hospitality-full-project.zip');
+  const requestedVariant = String(req.query.variant || '').toLowerCase();
+  const targetPath =
+    requestedVariant === 'legacy' && fs.existsSync(legacyZipPath)
+      ? legacyZipPath
+      : fs.existsSync(completeZipPath)
+      ? completeZipPath
+      : legacyZipPath;
+  if (fs.existsSync(targetPath)) {
+    const filename = path.basename(targetPath);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="ccd-hospitality-full-project.zip"');
-    return res.sendFile(zipPath);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.sendFile(targetPath);
   }
   return res.status(404).json({ error: 'Project zip file not found' });
 });
@@ -3530,25 +3604,39 @@ app.post('/api/jobs/search-now', (req: Request, res: Response) => {
   });
 });
 
-// 7.6 Authorized Gmail Sending Endpoint (RFC 2822 MIME + Google Workspace Gmail API)
-app.post('/api/gmail/send', async (req: Request, res: Response) => {
+// 7.6 Authorized Gmail Sending Endpoint (Delegates Multi-User SaaS Requests + Preserves Legacy Client OAuth Dispatch)
+app.post('/api/gmail/send', async (req: Request, res: Response, next: NextFunction) => {
+  const authHeader = req.headers.authorization || '';
+  const bodyObj = req.body || {};
+  const isMultiUserPayload =
+    Array.isArray(bodyObj.recipients) ||
+    'recipientEmail' in bodyObj ||
+    'cvId' in bodyObj ||
+    'coverLetter' in bodyObj ||
+    authHeader.startsWith('Bearer zvk.') ||
+    Boolean(req.headers['x-zenvik-session-token']);
+
+  // Delegate multi-user SaaS requests cleanly to defaultMultiUserSaaS.router (fixes route shadowing)
+  if (isMultiUserPayload) {
+    return next();
+  }
+
   try {
     const {
       recipient,
-      subject = 'Application for Hospitality Position – Fazle Rabbi',
+      subject = 'Application for Hospitality Position',
       bodyText = '',
       cvAttachment,
       pdfBase64,
-      pdfFilename = 'Fazle_Rabbi_CV.pdf',
+      pdfFilename = 'Candidate_CV.pdf',
       pdfMimeType = 'application/pdf',
       imageAttachments = [],
       accessToken,
-      senderEmail = 'fazle.rabbe.doc@gmail.com',
-      senderName = 'Fazle Rabbi Boyati',
-    } = req.body;
+      senderEmail = '',
+      senderName = '',
+    } = bodyObj;
 
-    const authHeader = req.headers.authorization;
-    const bearerToken = accessToken || (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null);
+    const bearerToken = accessToken || (authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null);
 
     if (!recipient || typeof recipient !== 'string' || !recipient.trim()) {
       return res.status(400).json({
@@ -3603,18 +3691,25 @@ app.post('/api/gmail/send', async (req: Request, res: Response) => {
       });
     }
 
-    // Construct MIME multipart message
+    // Construct MIME multipart message (CRLF-sanitized headers)
     const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-    const cleanSubject = Buffer.from(subject, 'utf-8').toString('base64');
+    const sanitizedSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
+    const cleanSubject = Buffer.from(sanitizedSubject, 'utf-8').toString('base64');
     const encodedSubject = `=?UTF-8?B?${cleanSubject}?=`;
 
-    const fromHeader = senderEmail
-      ? `From: =?UTF-8?B?${Buffer.from(senderName, 'utf-8').toString('base64')}?= <${senderEmail}>`
+    const safeSenderEmail = String(senderEmail || '').replace(/[\r\n<>]+/g, '').trim();
+    const safeSenderName = String(senderName || '').replace(/[\r\n"]+/g, '').trim();
+    const safeRecipientHeader = cleanRecipient.replace(/[\r\n<>]+/g, '').trim();
+
+    const fromHeader = safeSenderEmail
+      ? safeSenderName
+        ? `From: =?UTF-8?B?${Buffer.from(safeSenderName, 'utf-8').toString('base64')}?= <${safeSenderEmail}>`
+        : `From: <${safeSenderEmail}>`
       : '';
-    const replyToHeader = senderEmail ? `Reply-To: <${senderEmail}>` : '';
+    const replyToHeader = safeSenderEmail ? `Reply-To: <${safeSenderEmail}>` : '';
 
     const headers = [
-      `To: ${cleanRecipient}`,
+      `To: ${safeRecipientHeader}`,
       fromHeader,
       replyToHeader,
       `Subject: ${encodedSubject}`,
@@ -3892,16 +3987,33 @@ app.get('/api/admin/diagnostics', (_req: Request, res: Response) => {
     apiErrors: [
       ...(providerSummary.gemini.lastError ? [`Gemini: ${providerSummary.gemini.lastError}`] : []),
       ...(providerSummary.openai.lastError ? [`OpenAI: ${providerSummary.openai.lastError}`] : []),
+      ...(providerSummary.grok.lastError ? [`Grok: ${providerSummary.grok.lastError}`] : []),
     ],
     databaseErrors: [],
   });
 });
 
 app.post('/api/admin/diagnostics/run', async (req: Request, res: Response) => {
-  const { action = 'run_all', geminiModel, openaiModel } = req.body || {};
+  const { action = 'run_all', geminiModel, openaiModel, grokModel } = req.body || {};
 
-  if (geminiModel) aiCooperativeEngine.setProviderModel('Gemini', String(geminiModel));
-  if (openaiModel) aiCooperativeEngine.setProviderModel('OpenAI', String(openaiModel));
+  // Require verified admin session for mutating active server AI models
+  if (geminiModel || openaiModel || grokModel) {
+    const authHeader = req.headers.authorization || '';
+    const rawToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const session = rawToken ? verifySessionToken(rawToken) : null;
+    const isVerifiedAdmin = Boolean(
+      session && (session.role === 'admin' || ADMIN_EMAIL_ALLOWLIST.has(session.email.toLowerCase()))
+    );
+    if (!isVerifiedAdmin) {
+      return res.status(403).json({
+        error: 'ADMIN_PRIVILEGES_REQUIRED',
+        message: 'Administrator authentication is required to modify active AI provider models.',
+      });
+    }
+    if (geminiModel) aiCooperativeEngine.setProviderModel('Gemini', String(geminiModel));
+    if (openaiModel) aiCooperativeEngine.setProviderModel('OpenAI', String(openaiModel));
+    if (grokModel) aiCooperativeEngine.setProviderModel('Grok', String(grokModel));
+  }
 
   const results: Record<string, any> = {};
 
@@ -3910,6 +4022,9 @@ app.post('/api/admin/diagnostics/run', async (req: Request, res: Response) => {
   }
   if (action === 'test_openai' || action === 'run_all') {
     results.openai = await aiCooperativeEngine.testOpenAIConnection();
+  }
+  if (action === 'test_grok' || action === 'run_all') {
+    results.grok = await aiCooperativeEngine.testGrokConnection();
   }
   if (action === 'test_job_search' || action === 'run_all') {
     const disc = jobDatabaseEngine.triggerDiscoveryRun();
@@ -4038,6 +4153,9 @@ app.use('/api/personal-ai', personalAIChatRouter);
 // 12. Independent Intelligent Recipe Book (Persistent 7-Section Database + AI Assistant + Vision OCR + Image Gen)
 app.use('/api/recipe-book', recipeBookRouter);
 
+// 12b. English Zero-to-C2 Learning + Vocabulary Master Class + AI Interview Module
+app.use('/api/english-learning', englishLearningRouter);
+
 // 13. Python-First + Gemini Hybrid JobHunter Automation Engine Routes
 // Strictly preserves existing UI/UX, CV Gallery single source of truth, and excludes Telegram bot integration.
 app.get('/api/python-agent/status', async (_req: Request, res: Response) => {
@@ -4163,27 +4281,43 @@ const financeSheetEditEvents: Record<
 
 app.post('/api/finance/sheets-webhook', (req: Request, res: Response) => {
   try {
-    const { spreadsheetId, worksheetName, editedRow, editedColumn, editedAt } = req.body || {};
-    if (!spreadsheetId) {
-      return res.status(400).json({ ok: false, error: 'spreadsheetId is required' });
+    const configuredSecret = process.env.FINANCE_WEBHOOK_SECRET?.trim();
+    if (configuredSecret) {
+      const providedSecret = String(req.headers['x-webhook-secret'] || req.body?.webhookSecret || '').trim();
+      if (providedSecret !== configuredSecret) {
+        return res.status(401).json({ ok: false, error: 'Invalid webhook secret.' });
+      }
     }
-    financeSheetEditEvents[String(spreadsheetId)] = {
-      spreadsheetId: String(spreadsheetId),
-      worksheetName: String(worksheetName || ''),
+
+    const { spreadsheetId, worksheetName, editedRow, editedColumn, editedAt } = req.body || {};
+    const cleanSheetId = String(spreadsheetId || '').trim();
+    if (!cleanSheetId || !/^[a-zA-Z0-9_-]{8,128}$/.test(cleanSheetId)) {
+      return res.status(400).json({ ok: false, error: 'A valid spreadsheetId is required.' });
+    }
+
+    // Cap stored webhook entries to prevent unbounded memory growth
+    const existingKeys = Object.keys(financeSheetEditEvents);
+    if (existingKeys.length >= 500 && !financeSheetEditEvents[cleanSheetId]) {
+      delete financeSheetEditEvents[existingKeys[0]];
+    }
+
+    financeSheetEditEvents[cleanSheetId] = {
+      spreadsheetId: cleanSheetId,
+      worksheetName: String(worksheetName || '').slice(0, 120),
       editedRow: editedRow ? Number(editedRow) : undefined,
       editedColumn: editedColumn ? Number(editedColumn) : undefined,
-      editedAt: String(editedAt || new Date().toISOString()),
+      editedAt: String(editedAt || new Date().toISOString()).slice(0, 64),
       receivedAt: Date.now(),
     };
-    return res.json({ ok: true, receivedAt: financeSheetEditEvents[String(spreadsheetId)].receivedAt });
+    return res.json({ ok: true, receivedAt: financeSheetEditEvents[cleanSheetId].receivedAt });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err?.message || 'Webhook processing error' });
   }
 });
 
 app.get('/api/finance/sheets-webhook-status', (req: Request, res: Response) => {
-  const spreadsheetId = String(req.query.spreadsheetId || '');
-  if (!spreadsheetId) {
+  const spreadsheetId = String(req.query.spreadsheetId || '').trim();
+  if (!spreadsheetId || !/^[a-zA-Z0-9_-]{8,128}$/.test(spreadsheetId)) {
     return res.json({ ok: true, lastEvent: null });
   }
   return res.json({
@@ -4196,6 +4330,34 @@ app.get('/api/finance/sheets-webhook-status', (req: Request, res: Response) => {
 app.use('/api', defaultMultiUserSaaS.router);
 app.get(['/auth/callback', '/auth/callback/'], (req: Request, res: Response) => {
   return defaultMultiUserSaaS.handleOAuthCallback(req, res);
+});
+
+// 16. API 404 Handler (ensures unmatched /api/* routes return JSON 404 instead of index.html)
+app.use('/api', (req: Request, res: Response) => {
+  return res.status(404).json({
+    error: 'API_ROUTE_NOT_FOUND',
+    message: `No API endpoint matches ${req.method} ${req.originalUrl.split('?')[0]}`,
+  });
+});
+
+// 17. Global Express Error Handler (handles malformed JSON and unexpected exceptions safely)
+app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+  if (err?.type === 'entity.parse.failed' || (err instanceof SyntaxError && 'body' in err)) {
+    return res.status(400).json({
+      error: 'INVALID_JSON_PAYLOAD',
+      message: 'Malformed JSON request body.',
+    });
+  }
+  console.error('[Server Unhandled Error]', err?.message || err);
+  return res.status(err?.status || 500).json({
+    error: 'INTERNAL_SERVER_ERROR',
+    message: process.env.NODE_ENV === 'production'
+      ? 'An internal server error occurred.'
+      : err?.message || 'Internal server error',
+  });
 });
 
 // Start dev Vite or serve production build

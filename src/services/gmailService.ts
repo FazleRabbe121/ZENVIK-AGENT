@@ -155,34 +155,119 @@ export interface AuthorizedGmailSenderAccount {
 
 const STORAGE_KEY_SENDER_ACCOUNTS = 'cv_authorized_gmail_sender_accounts_v1';
 
+// Strictly in-memory store for per-account OAuth access tokens (never persisted in localStorage/sessionStorage)
+const inMemorySenderTokens = new Map<string, { token: string; expiresAt: number }>();
+
+export function syncActiveGmailSenderInMemory(params: {
+  email: string;
+  displayName?: string;
+  accessToken?: string | null;
+  expiresInSeconds?: number;
+}): AuthorizedGmailSenderAccount[] {
+  const cleanEmail = (params.email || '').trim().toLowerCase();
+  if (!cleanEmail) return loadAuthorizedSenderAccounts();
+
+  if (params.accessToken) {
+    const expiresAt = Date.now() + Math.max(300, (params.expiresInSeconds || 3600) - 120) * 1000;
+    inMemorySenderTokens.set(cleanEmail, { token: params.accessToken, expiresAt });
+    setCachedGoogleToken(params.accessToken, params.expiresInSeconds || 3600);
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const displayName = params.displayName || auth.currentUser?.displayName || getCachedUserName() || cleanEmail.split('@')[0];
+  const existing = loadAuthorizedSenderAccounts();
+  const alreadyIdx = existing.findIndex(a => a.email.toLowerCase() === cleanEmail);
+
+  let updated: AuthorizedGmailSenderAccount[];
+  if (alreadyIdx !== -1) {
+    updated = existing.map((acc, idx) =>
+      idx === alreadyIdx
+        ? {
+            ...acc,
+            displayName,
+            isActive: true,
+            lastStatus: params.accessToken ? ('Ready' as const) : acc.lastStatus,
+          }
+        : { ...acc, isActive: false }
+    );
+  } else {
+    updated = [
+      ...existing.map(a => ({ ...a, isActive: false })),
+      {
+        email: cleanEmail,
+        displayName,
+        isPrimaryDefault: existing.length === 0,
+        isActive: true,
+        sentTodayCount: 0,
+        dailyQuotaDate: today,
+        lastStatus: params.accessToken ? 'Ready' : 'Auth Expired',
+        connectedAt: new Date().toISOString(),
+      },
+    ];
+  }
+
+  saveAuthorizedSenderAccounts(updated);
+  return updated;
+}
+
 export function loadAuthorizedSenderAccounts(): AuthorizedGmailSenderAccount[] {
   const today = new Date().toISOString().slice(0, 10);
-  const primaryEmail = auth.currentUser?.email || getCachedUserEmail() || 'fazle.rabbe.doc@gmail.com';
+  const primaryEmail = (auth.currentUser?.email || getCachedUserEmail() || 'fazle.rabbe.doc@gmail.com').trim();
+  const primaryLower = primaryEmail.toLowerCase();
   const primaryName = auth.currentUser?.displayName || getCachedUserName() || 'Fazle Rabbi';
   const currentToken = getCachedGoogleToken();
   const isExpired = isGoogleTokenExpired();
+
+  if (currentToken && !isExpired) {
+    inMemorySenderTokens.set(primaryLower, {
+      token: currentToken,
+      expiresAt: Date.now() + Math.max(60_000, getGoogleTokenTimeRemainingMs()),
+    });
+  }
 
   try {
     const raw = localStorage.getItem(STORAGE_KEY_SENDER_ACCOUNTS);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((acc: AuthorizedGmailSenderAccount) => {
+        let hasPrimary = false;
+        const hydrated = parsed.map((acc: AuthorizedGmailSenderAccount) => {
           const resetDaily = acc.dailyQuotaDate !== today;
-          const isCurrentAuth = acc.email.toLowerCase() === primaryEmail.toLowerCase();
+          const accLower = (acc.email || '').trim().toLowerCase();
+          const isCurrentAuth = accLower === primaryLower;
+          if (isCurrentAuth) hasPrimary = true;
+          const memEntry = inMemorySenderTokens.get(accLower);
+          const validMemToken = memEntry && memEntry.expiresAt > Date.now() ? memEntry.token : null;
+          const effectiveToken = isCurrentAuth ? currentToken || validMemToken : validMemToken;
           return {
             ...acc,
             sentTodayCount: resetDaily ? 0 : acc.sentTodayCount || 0,
             dailyQuotaDate: today,
-            accessToken: isCurrentAuth ? currentToken : acc.accessToken,
+            accessToken: effectiveToken,
+            isActive: auth.currentUser?.email ? isCurrentAuth : acc.isActive,
             lastStatus:
               acc.rateLimitedUntil && acc.rateLimitedUntil > Date.now()
-                ? 'Rate Limited / Quota Reached'
-                : isCurrentAuth && (!currentToken || isExpired)
-                ? 'Auth Expired'
-                : 'Ready',
+                ? ('Rate Limited / Quota Reached' as const)
+                : !effectiveToken || (isCurrentAuth && isExpired)
+                ? ('Auth Expired' as const)
+                : ('Ready' as const),
           };
         });
+
+        if (!hasPrimary && auth.currentUser?.email) {
+          hydrated.unshift({
+            email: primaryEmail,
+            displayName: primaryName,
+            isPrimaryDefault: true,
+            isActive: true,
+            accessToken: currentToken,
+            sentTodayCount: 0,
+            dailyQuotaDate: today,
+            lastStatus: currentToken && !isExpired ? 'Ready' : 'Auth Expired',
+            connectedAt: new Date().toISOString(),
+          });
+        }
+        return hydrated;
       }
     }
   } catch (e) {
@@ -205,7 +290,9 @@ export function loadAuthorizedSenderAccounts(): AuthorizedGmailSenderAccount[] {
 
 export function saveAuthorizedSenderAccounts(accounts: AuthorizedGmailSenderAccount[]): void {
   try {
-    localStorage.setItem(STORAGE_KEY_SENDER_ACCOUNTS, JSON.stringify(accounts));
+    // Strip OAuth access tokens before saving metadata to localStorage
+    const sanitized = accounts.map(({ accessToken: _omitToken, tokenExpiresAt: _omitExp, ...meta }) => meta);
+    localStorage.setItem(STORAGE_KEY_SENDER_ACCOUNTS, JSON.stringify(sanitized));
   } catch (e) {
     console.warn('Failed to save authorized sender accounts:', e);
   }
@@ -213,6 +300,11 @@ export function saveAuthorizedSenderAccounts(accounts: AuthorizedGmailSenderAcco
 
 export function getActiveSenderAccount(): AuthorizedGmailSenderAccount {
   const accounts = loadAuthorizedSenderAccounts();
+  if (auth.currentUser?.email) {
+    const authLower = auth.currentUser.email.toLowerCase();
+    const match = accounts.find(a => a.email.toLowerCase() === authLower);
+    if (match) return match;
+  }
   return accounts.find(a => a.isActive) || accounts.find(a => a.isPrimaryDefault) || accounts[0];
 }
 
@@ -224,7 +316,7 @@ export function recordSenderAccountActivity(params: {
 }): void {
   const today = new Date().toISOString().slice(0, 10);
   const accounts = loadAuthorizedSenderAccounts();
-  const lower = (params.email || 'fazle.rabbe.doc@gmail.com').trim().toLowerCase();
+  const lower = (params.email || auth.currentUser?.email || 'fazle.rabbe.doc@gmail.com').trim().toLowerCase();
   let found = false;
 
   const updated = accounts.map(acc => {
@@ -244,7 +336,7 @@ export function recordSenderAccountActivity(params: {
 
   if (!found) {
     updated.push({
-      email: params.email || 'fazle.rabbe.doc@gmail.com',
+      email: params.email || auth.currentUser?.email || 'fazle.rabbe.doc@gmail.com',
       displayName: getCachedUserName() || 'Fazle Rabbi',
       isPrimaryDefault: updated.length === 0,
       isActive: true,
@@ -266,9 +358,9 @@ export function switchActiveSenderAccount(email: string): AuthorizedGmailSenderA
     ...acc,
     isActive: acc.email.toLowerCase() === lower,
   }));
-  const newlyActive = accounts.find(a => a.isActive);
-  if (newlyActive?.accessToken) {
-    setCachedGoogleToken(newlyActive.accessToken, 3600);
+  const mem = inMemorySenderTokens.get(lower);
+  if (mem && mem.expiresAt > Date.now()) {
+    setCachedGoogleToken(mem.token, Math.floor((mem.expiresAt - Date.now()) / 1000));
   }
   saveAuthorizedSenderAccounts(accounts);
   return accounts;
@@ -286,44 +378,16 @@ export async function connectAdditionalGmailAccountViaOAuth(): Promise<{
       return {
         success: false,
         accounts: loadAuthorizedSenderAccounts(),
-        error: 'Google OAuth authorization was cancelled or did not return an email/token.',
+        error: 'Google authorization was cancelled or did not return a Gmail send token. Please allow popups and grant Gmail permission.',
       };
     }
-    const today = new Date().toISOString().slice(0, 10);
-    const email = res.user.email;
-    const displayName = res.user.displayName || 'Fazle Rabbi';
-    const existing = loadAuthorizedSenderAccounts();
-    const alreadyIdx = existing.findIndex(a => a.email.toLowerCase() === email.toLowerCase());
-
-    let newAcc: AuthorizedGmailSenderAccount;
-    let updated: AuthorizedGmailSenderAccount[];
-    if (alreadyIdx !== -1) {
-      newAcc = {
-        ...existing[alreadyIdx],
-        displayName,
-        accessToken: res.accessToken,
-        tokenExpiresAt: Date.now() + 3400 * 1000,
-        lastStatus: 'Ready',
-        isActive: true,
-      };
-      updated = existing.map((a, idx) => (idx === alreadyIdx ? newAcc : { ...a, isActive: false }));
-    } else {
-      newAcc = {
-        email,
-        displayName,
-        isPrimaryDefault: existing.length === 0,
-        isActive: true,
-        accessToken: res.accessToken,
-        tokenExpiresAt: Date.now() + 3400 * 1000,
-        sentTodayCount: 0,
-        dailyQuotaDate: today,
-        lastStatus: 'Ready',
-        connectedAt: new Date().toISOString(),
-      };
-      updated = [...existing.map(a => ({ ...a, isActive: false })), newAcc];
-    }
-
-    saveAuthorizedSenderAccounts(updated);
+    const updated = syncActiveGmailSenderInMemory({
+      email: res.user.email,
+      displayName: res.user.displayName || 'Fazle Rabbi',
+      accessToken: res.accessToken,
+      expiresInSeconds: 3600,
+    });
+    const newAcc = updated.find(a => a.email.toLowerCase() === res.user.email!.toLowerCase());
     return { success: true, account: newAcc, accounts: updated };
   } catch (err: any) {
     return {
@@ -1136,24 +1200,30 @@ export function buildGmailRawMessage(params: {
   imageAttachments?: EmailAttachmentPayload[];
 }): string {
   const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-  
+
+  // Sanitize header values against CRLF injection
+  const safeSubject = (params.subject || '').replace(/[\r\n]+/g, ' ').trim();
+  const safeRecipient = (params.recipient || '').replace(/[\r\n<>]+/g, '').trim();
+  const safeSenderEmail = (params.senderEmail || '').replace(/[\r\n<>]+/g, '').trim();
+  const safeSenderName = (params.senderName || '').replace(/[\r\n"]+/g, '').trim();
+
   // RFC 2047 encoded subject safely handles en-dashes (–), quotes, and special characters
-  const encodedSubject = `=?UTF-8?B?${utf8ToBase64(params.subject)}?=`;
+  const encodedSubject = `=?UTF-8?B?${utf8ToBase64(safeSubject)}?=`;
 
   let fromHeader = '';
   let replyToHeader = '';
-  if (params.senderEmail) {
-    if (params.senderName) {
-      fromHeader = `From: =?UTF-8?B?${utf8ToBase64(params.senderName)}?= <${params.senderEmail}>`;
+  if (safeSenderEmail) {
+    if (safeSenderName) {
+      fromHeader = `From: =?UTF-8?B?${utf8ToBase64(safeSenderName)}?= <${safeSenderEmail}>`;
     } else {
-      fromHeader = `From: <${params.senderEmail}>`;
+      fromHeader = `From: <${safeSenderEmail}>`;
     }
     // Ensures any reply from employer arrives directly in the user's primary Gmail inbox
-    replyToHeader = `Reply-To: <${params.senderEmail}>`;
+    replyToHeader = `Reply-To: <${safeSenderEmail}>`;
   }
 
   const headers = [
-    `To: ${params.recipient}`,
+    `To: ${safeRecipient}`,
     fromHeader,
     replyToHeader,
     `Subject: ${encodedSubject}`,
@@ -1292,10 +1362,22 @@ export async function testGmailTokenValidity(token?: string | null): Promise<boo
   const t = token || getCachedGoogleToken();
   if (!t) return false;
   try {
-    // Use OAuth2 tokeninfo endpoint first so we never trigger a false 403 scope error on /profile
-    const res = await fetch(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(t)}`);
+    // Use OAuth2 tokeninfo endpoint and verify that gmail.send permission was actually granted
+    const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(t)}`);
     if (res.ok) {
       const data = await res.json().catch(() => ({}));
+      const scopeStr = String(data?.scope || '');
+      const hasGmailSendScope =
+        !scopeStr ||
+        scopeStr.includes('gmail.send') ||
+        scopeStr.includes('mail.google.com') ||
+        scopeStr.includes('gmail.compose') ||
+        scopeStr.includes('gmail.modify');
+      if (!hasGmailSendScope) {
+        console.warn('[GmailAPI] OAuth token is missing gmail.send permission; prompting reconnect.');
+        setCachedGoogleToken(null);
+        return false;
+      }
       const expiresIn = Number(data?.expires_in) || 1800;
       setCachedGoogleToken(t, expiresIn);
       return true;
@@ -1677,8 +1759,8 @@ export async function sendJobApplicationViaGmail(params: {
 
   try {
     const activeSenderAcc = getActiveSenderAccount();
-    // Refresh the access token before it expires if < 5 minutes remain
-    let token = params.accessToken || activeSenderAcc.accessToken || getCachedGoogleToken();
+    // Always prioritize live in-memory OAuth token and refresh if < 5 minutes remain
+    let token = params.accessToken || getCachedGoogleToken() || activeSenderAcc.accessToken;
     if (!token || getGoogleTokenTimeRemainingMs() < 5 * 60 * 1000) {
       const refreshed = await ensureFreshGoogleAccessToken(5 * 60 * 1000);
       if (refreshed) token = refreshed;
@@ -1697,9 +1779,9 @@ export async function sendJobApplicationViaGmail(params: {
       };
     }
 
-    // 1b. Resolve & Block Known Bouncing / Portal-Only / Non-Hiring Aliases (prevents Exchange postmaster bounces & reception/reservations spam)
+    // 1b. Resolve & Block Known Bouncing / Portal-Only Chain Aliases (bypass for self-test deliveries)
     const emailResolution = resolveVerifiedEmployerEmail(rawRecipient, params.company);
-    if (!emailResolution.isDeliverable) {
+    if (!params.isTestDelivery && !emailResolution.isDeliverable) {
       const isNonHiring = Boolean(emailResolution.isNonHiringAliasRejected);
       const blockReason =
         emailResolution.bouncePreventionNote ||
@@ -1714,8 +1796,8 @@ export async function sendJobApplicationViaGmail(params: {
       };
     }
 
-    const cleanRecipient = emailResolution.verifiedEmail || rawRecipient;
-    if (emailResolution.wasCorrected) {
+    const cleanRecipient = params.isTestDelivery ? rawRecipient : (emailResolution.verifiedEmail || rawRecipient);
+    if (!params.isTestDelivery && emailResolution.wasCorrected) {
       console.log(
         `[GmailAPI] Auto-upgraded legacy/non-hiring recipient "${rawRecipient}" -> verified official HR address "${cleanRecipient}" (${emailResolution.verificationSource})`
       );
@@ -1862,8 +1944,8 @@ export async function sendJobApplicationViaGmail(params: {
     }
 
     const currentUser = auth.currentUser;
-    const userEmail = activeSenderAcc.email || currentUser?.email || getCachedUserEmail();
-    const userName = activeSenderAcc.displayName || currentUser?.displayName || getCachedUserName();
+    const userEmail = currentUser?.email || activeSenderAcc.email || getCachedUserEmail();
+    const userName = currentUser?.displayName || activeSenderAcc.displayName || getCachedUserName();
 
     const preserveOnFailure = (
       reason: string,
@@ -2645,16 +2727,66 @@ export const GmailService = {
   async connectGmailAccount(): Promise<{ connected: boolean; email: string | null; error?: string }> {
     try {
       const res = await signInWithGoogle();
-      if (res && res.accessToken) {
+      if (res && res.accessToken && res.user?.email) {
+        syncActiveGmailSenderInMemory({
+          email: res.user.email,
+          displayName: res.user.displayName || undefined,
+          accessToken: res.accessToken,
+          expiresInSeconds: 3600,
+        });
+
+        // Best-effort sync to Multi-User backend so Personal Gmail Integration & Connected Services stay in sync
+        try {
+          const idToken = await res.user.getIdToken(true);
+          const syncRes = await fetch('/api/multiuser/auth/firebase-sync', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              uid: res.user.uid,
+              email: res.user.email,
+              displayName: res.user.displayName,
+              idToken,
+            }),
+          });
+          const syncData = syncRes.ok ? await syncRes.json().catch(() => ({})) : {};
+          const authBearer = syncData?.sessionToken || idToken;
+          if (syncData?.sessionToken) {
+            try {
+              localStorage.setItem('zenvik_multiuser_session_token_v1', syncData.sessionToken);
+              localStorage.setItem('zenvik_multiuser_active_email_v1', res.user.email);
+              if (res.user.displayName) {
+                localStorage.setItem('zenvik_multiuser_active_name_v1', res.user.displayName);
+              }
+            } catch {}
+          }
+          await fetch('/api/gmail/oauth/connect-token', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authBearer}`,
+            },
+            body: JSON.stringify({
+              accessToken: res.accessToken,
+              gmailAddress: res.user.email,
+              expiresIn: 3600,
+            }),
+          }).catch(() => {});
+        } catch {
+          // Non-fatal if backend workspace sync is offline
+        }
+
         return {
           connected: true,
-          email: res.user?.email || getCachedUserEmail() || null,
+          email: res.user.email,
         };
       }
       return {
         connected: false,
         email: null,
-        error: 'Google authorization popup was closed or did not return an access token.',
+        error: 'Google authorization popup was closed or did not grant Gmail send permission. Please allow popups and try again.',
       };
     } catch (err: any) {
       return {
@@ -2666,6 +2798,7 @@ export const GmailService = {
   },
 
   disconnectGmailAccount(): void {
+    inMemorySenderTokens.clear();
     setCachedGoogleToken(null);
   },
 

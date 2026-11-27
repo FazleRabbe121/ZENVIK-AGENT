@@ -1,12 +1,11 @@
 {
-  "projectId": "ccd---a-better-you-every-day",
-  "appId": "1:1020312632954:web:5104b3fe686a07214885c3",
-  "apiKey": "AIzaSyDQL9bIWZ1wlBRHxiRXRXrsv8fYZdyWPI4",
-  "authDomain": "ccd---a-better-you-every-day.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-e4405bff-96e5-4e9d-8fc6-6665341e100c",
-  "storageBucket": "ccd---a-better-you-every-day.firebasestorage.app",
-  "messagingSenderId": "1020312632954",
+  "projectId": "ace-mission-353410",
+  "appId": "1:15585254957:web:05995ad3942b3523bde2a4",
+  "apiKey": "AIzaSyBL_rEwKdWUt5KErZmxsgs3u6X8tt9ErL0",
+  "authDomain": "ace-mission-353410.firebaseapp.com",
+  "storageBucket": "ace-mission-353410.firebasestorage.app",
+  "messagingSenderId": "15585254957",
   "measurementId": "",
-  "oAuthClientId": "1020312632954-68ff93oo24eha4cj5dp381qbkjc7dbps.apps.googleusercontent.com",
+  "oAuthClientId": "15585254957-gc5h65gmofgs76m59rteh3klrfsbmv1e.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

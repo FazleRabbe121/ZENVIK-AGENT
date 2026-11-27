@@ -30,6 +30,7 @@ import {
   Cpu,
   Award,
   Smartphone,
+  GraduationCap,
 } from 'lucide-react';
 import { useTheme, ThemeToggle } from '../context/ThemeContext';
 import { CCDLogo } from './CCDLogo';
@@ -73,7 +74,8 @@ export type NavTab =
   | 'cv'
   | 'apply-email'
   | 'interview-admin'
-  | 'interview-portal';
+  | 'interview-portal'
+  | 'english-master';
 
 interface SidebarNavProps {
   currentTab: NavTab;
@@ -114,6 +116,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     { id: 'dashboard' as NavTab, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'finance' as NavTab, label: 'Finance & Expense Tracker', icon: Wallet, badge: 'Sheets', pulse: true },
     { id: 'personal-ai' as NavTab, label: 'Personal AI', icon: Cpu, badge: 'AI Chat' },
+    { id: 'english-master' as NavTab, label: 'English Zero-to-C2', icon: GraduationCap, badge: 'Pre-A1–C2' },
     { id: 'recipe-book' as NavTab, label: 'Recipe Book', icon: UtensilsCrossed, badge: 'AI Vault' },
     { id: 'europe-jobs' as NavTab, label: 'Europe Job Market', icon: Globe, pulse: true },
     { id: 'cyprus-jobs' as NavTab, label: 'Cyprus Job Market', icon: MapPin },

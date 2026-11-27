@@ -119,95 +119,89 @@ export const db = (() => {
 })();
 export const auth = getAuth(app);
 
-// Persistent OAuth token & user caching for Google Workspace access (Drive, Gmail)
+// In-memory OAuth access token cache (never stored in localStorage/sessionStorage per security policy)
 const STORAGE_KEY_TOKEN = 'cached_google_token_v1';
 const STORAGE_KEY_TOKEN_EXPIRY = 'cached_google_token_expiry_v1';
 const STORAGE_KEY_USER_EMAIL = 'cached_google_user_email_v1';
 const STORAGE_KEY_USER_NAME = 'cached_google_user_name_v1';
 
-let cachedGoogleToken: string | null = (() => {
+// Proactively remove any legacy persisted OAuth tokens from browser storage on startup
+if (typeof window !== 'undefined') {
   try {
-    const exp = localStorage.getItem(STORAGE_KEY_TOKEN_EXPIRY);
-    if (exp && Date.now() > parseInt(exp, 10)) {
-      localStorage.removeItem(STORAGE_KEY_TOKEN);
-      localStorage.removeItem(STORAGE_KEY_TOKEN_EXPIRY);
-      return null;
-    }
-    return localStorage.getItem(STORAGE_KEY_TOKEN);
-  } catch {
-    return null;
-  }
-})();
+    localStorage.removeItem(STORAGE_KEY_TOKEN);
+    localStorage.removeItem(STORAGE_KEY_TOKEN_EXPIRY);
+    sessionStorage.removeItem(STORAGE_KEY_TOKEN);
+    sessionStorage.removeItem(STORAGE_KEY_TOKEN_EXPIRY);
+  } catch {}
+}
+
+let cachedGoogleToken: string | null = null;
+let cachedGoogleTokenExpiryMs: number = 0;
+
+function emitGmailConnectionChanged(connected: boolean, email?: string | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent('gmail_connection_updated', {
+        detail: {
+          connected,
+          email: email ?? auth.currentUser?.email ?? null,
+        },
+      })
+    );
+  } catch {}
+}
 
 export const googleProvider = new GoogleAuthProvider();
-googleProvider.addScope('https://www.googleapis.com/auth/drive');
-googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
-googleProvider.addScope('https://www.googleapis.com/auth/drive.readonly');
-googleProvider.addScope('https://www.googleapis.com/auth/spreadsheets');
-googleProvider.addScope('https://www.googleapis.com/auth/spreadsheets.readonly');
 googleProvider.addScope('https://www.googleapis.com/auth/gmail.send');
 googleProvider.addScope('https://www.googleapis.com/auth/gmail.readonly');
+googleProvider.addScope('https://www.googleapis.com/auth/spreadsheets');
+googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
+googleProvider.addScope('https://www.googleapis.com/auth/drive.readonly');
 googleProvider.setCustomParameters({
-  prompt: 'select_account',
+  prompt: 'select_account consent',
 });
 
 export function isGoogleTokenExpired(): boolean {
-  try {
-    const token = localStorage.getItem(STORAGE_KEY_TOKEN);
-    if (!token) return true;
-    const exp = localStorage.getItem(STORAGE_KEY_TOKEN_EXPIRY);
-    if (!exp) return false;
-    return Date.now() > parseInt(exp, 10);
-  } catch {
-    return true;
-  }
+  if (!cachedGoogleToken) return true;
+  if (!cachedGoogleTokenExpiryMs) return false;
+  return Date.now() > cachedGoogleTokenExpiryMs;
 }
 
 export function getGoogleTokenTimeRemainingMs(): number {
-  try {
-    const token = localStorage.getItem(STORAGE_KEY_TOKEN);
-    if (!token) return 0;
-    const exp = localStorage.getItem(STORAGE_KEY_TOKEN_EXPIRY);
-    if (!exp) return 30 * 60 * 1000;
-    return Math.max(0, parseInt(exp, 10) - Date.now());
-  } catch {
-    return 0;
-  }
+  if (!cachedGoogleToken) return 0;
+  if (!cachedGoogleTokenExpiryMs) return 30 * 60 * 1000;
+  return Math.max(0, cachedGoogleTokenExpiryMs - Date.now());
 }
 
 export function getCachedGoogleToken(): string | null {
-  try {
-    const exp = localStorage.getItem(STORAGE_KEY_TOKEN_EXPIRY);
-    if (exp && Date.now() > parseInt(exp, 10)) {
-      setCachedGoogleToken(null);
-      return null;
-    }
-    if (cachedGoogleToken) return cachedGoogleToken;
-    return localStorage.getItem(STORAGE_KEY_TOKEN);
-  } catch {
-    return cachedGoogleToken;
+  if (!cachedGoogleToken) return null;
+  if (cachedGoogleTokenExpiryMs && Date.now() > cachedGoogleTokenExpiryMs) {
+    setCachedGoogleToken(null);
+    return null;
   }
+  return cachedGoogleToken;
 }
 
 export function setCachedGoogleToken(token: string | null, expiresInSeconds = 3600) {
   cachedGoogleToken = token;
+  if (token) {
+    // Buffer by 120 seconds to prevent using tokens that are on the verge of expiring
+    cachedGoogleTokenExpiryMs = Date.now() + Math.max(300, expiresInSeconds - 120) * 1000;
+  } else {
+    cachedGoogleTokenExpiryMs = 0;
+  }
+  // Ensure no legacy storage keys remain
   try {
-    if (token) {
-      localStorage.setItem(STORAGE_KEY_TOKEN, token);
-      // Buffer by 120 seconds to prevent using tokens that are on the verge of expiring
-      const expiry = Date.now() + Math.max(300, expiresInSeconds - 120) * 1000;
-      localStorage.setItem(STORAGE_KEY_TOKEN_EXPIRY, expiry.toString());
-    } else {
-      localStorage.removeItem(STORAGE_KEY_TOKEN);
-      localStorage.removeItem(STORAGE_KEY_TOKEN_EXPIRY);
-    }
+    localStorage.removeItem(STORAGE_KEY_TOKEN);
+    localStorage.removeItem(STORAGE_KEY_TOKEN_EXPIRY);
   } catch {}
+  emitGmailConnectionChanged(Boolean(token), auth.currentUser?.email || null);
 }
 
 /**
- * Proactively checks if the Google OAuth access token is expired or within 5 minutes of expiring,
- * verifies it against the Google tokeninfo endpoint, and refreshes it before expiry so queued
- * email sends do not fail mid-batch.
+ * Proactively checks if the in-memory Google OAuth access token is valid and has > minRemainingMs left.
+ * Checks tokeninfo and verifies gmail.send permission; refreshes via popup if missing or expiring.
  */
 export async function ensureFreshGoogleAccessToken(minRemainingMs: number = 5 * 60 * 1000): Promise<string | null> {
   const existingToken = getCachedGoogleToken();
@@ -219,7 +213,13 @@ export async function ensureFreshGoogleAccessToken(minRemainingMs: number = 5 * 
       if (infoRes.ok) {
         const info = await infoRes.json();
         const expiresIn = Number(info?.expires_in || 0);
-        if (expiresIn > 300) {
+        const scopeStr = String(info?.scope || '');
+        const hasGmailSend =
+          scopeStr.includes('gmail.send') ||
+          scopeStr.includes('mail.google.com') ||
+          scopeStr.includes('gmail.compose') ||
+          scopeStr.includes('gmail.modify');
+        if (expiresIn > 300 && (!scopeStr || hasGmailSend)) {
           setCachedGoogleToken(existingToken, expiresIn);
           return existingToken;
         }
@@ -232,7 +232,7 @@ export async function ensureFreshGoogleAccessToken(minRemainingMs: number = 5 * 
     }
   }
 
-  // Token is missing, expired, or about to expire within 5 minutes — attempt silent/popup refresh
+  // Token is missing, expired, or about to expire within 5 minutes — attempt popup refresh
   try {
     const refreshed = await signInWithGoogle();
     if (refreshed?.accessToken) {
@@ -272,11 +272,13 @@ const USER_SCOPED_LOCAL_STORAGE_KEYS = [
 
 export function clearUserScopedLocalStorage(): void {
   cachedGoogleToken = null;
+  cachedGoogleTokenExpiryMs = 0;
   try {
     for (const key of USER_SCOPED_LOCAL_STORAGE_KEYS) {
       localStorage.removeItem(key);
     }
   } catch {}
+  emitGmailConnectionChanged(false, null);
 }
 
 export function getCachedUserEmail(): string {
@@ -307,7 +309,7 @@ export function getCachedUserName(): string {
   }
 }
 
-// Auto-sync auth state into local storage and isolate localStorage when switching user accounts
+// Auto-sync auth state and clear in-memory OAuth token when user signs out or switches accounts
 onAuthStateChanged(auth, user => {
   try {
     const prevUid = localStorage.getItem(STORAGE_KEY_LAST_ACTIVE_UID);
@@ -321,6 +323,11 @@ onAuthStateChanged(auth, user => {
       if (user.displayName) {
         localStorage.setItem(STORAGE_KEY_USER_NAME, user.displayName);
       }
+    } else {
+      // Clear cached in-memory OAuth token immediately on sign-out
+      cachedGoogleToken = null;
+      cachedGoogleTokenExpiryMs = 0;
+      emitGmailConnectionChanged(false, null);
     }
   } catch {}
 });
@@ -342,13 +349,13 @@ if (isTopLevelWindow) {
         if (result) {
           const credential = GoogleAuthProvider.credentialFromResult(result);
           const token = credential?.accessToken || null;
-          if (token) setCachedGoogleToken(token);
           if (result.user.email) setCachedUserEmail(result.user.email);
           if (result.user.displayName) {
             try {
               localStorage.setItem(STORAGE_KEY_USER_NAME, result.user.displayName);
             } catch {}
           }
+          if (token) setCachedGoogleToken(token);
         }
       })
       .catch(() => {
@@ -374,33 +381,45 @@ if (typeof window !== 'undefined') {
   testConnection().catch(() => {});
 }
 
-// Least-privilege provider requesting ONLY gmail.send for personal Gmail connection
+// Least-privilege provider requesting Gmail send + readonly for personal Gmail connection
 export const gmailSendOnlyProvider = new GoogleAuthProvider();
 gmailSendOnlyProvider.addScope('https://www.googleapis.com/auth/gmail.send');
+gmailSendOnlyProvider.addScope('https://www.googleapis.com/auth/gmail.readonly');
 gmailSendOnlyProvider.setCustomParameters({
   prompt: 'consent select_account',
 });
+
+function formatGoogleAuthError(error: any): Error {
+  const code = String(error?.code || '');
+  if (code === 'auth/popup-blocked') {
+    return new Error(
+      'Google sign-in popup was blocked by your browser. Please allow popups for this app and click Connect Gmail again.'
+    );
+  }
+  if (code === 'auth/unauthorized-domain') {
+    return new Error(
+      `This domain (${typeof window !== 'undefined' ? window.location.hostname : 'preview'}) is not yet authorized for Google sign-in. Open the app in its main preview URL or authorize this domain in Firebase Auth.`
+    );
+  }
+  if (code === 'auth/operation-not-supported-in-this-environment') {
+    return new Error(
+      'Popup sign-in is blocked by your current browser privacy/cookie settings. Please enable third-party popups or open the app in a new tab and try again.'
+    );
+  }
+  if (code === 'auth/network-request-failed') {
+    return new Error('Network error contacting Google sign-in. Check your internet connection and try again.');
+  }
+  return error instanceof Error ? error : new Error(String(error?.message || 'Google sign-in failed.'));
+}
 
 export async function authorizePersonalGmailSendWithPopup(): Promise<{
   user: User;
   accessToken: string | null;
 } | null> {
-  const result = await signInWithPopup(auth, gmailSendOnlyProvider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  const token = credential?.accessToken || null;
-  if (token) {
-    setCachedGoogleToken(token);
-  }
-  return { user: result.user, accessToken: token };
-}
-
-// Google Sign-In with resilient Popup -> Redirect fallback for top-level mobile browsers
-export async function signInWithGoogle(): Promise<{ user: User; accessToken: string | null } | null> {
   try {
-    const result = await signInWithPopup(auth, googleProvider);
+    const result = await signInWithPopup(auth, gmailSendOnlyProvider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     const token = credential?.accessToken || null;
-    setCachedGoogleToken(token);
     if (result.user.email) {
       setCachedUserEmail(result.user.email);
     }
@@ -409,29 +428,56 @@ export async function signInWithGoogle(): Promise<{ user: User; accessToken: str
         localStorage.setItem(STORAGE_KEY_USER_NAME, result.user.displayName);
       } catch {}
     }
+    if (token) {
+      setCachedGoogleToken(token);
+    }
     return { user: result.user, accessToken: token };
   } catch (error: any) {
+    const code = String(error?.code || '');
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      return null;
+    }
+    throw formatGoogleAuthError(error);
+  }
+}
+
+// Google Sign-In with resilient Popup -> Redirect fallback for top-level mobile browsers
+export async function signInWithGoogle(): Promise<{ user: User; accessToken: string | null } | null> {
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const token = credential?.accessToken || null;
+    if (result.user.email) {
+      setCachedUserEmail(result.user.email);
+    }
+    if (result.user.displayName) {
+      try {
+        localStorage.setItem(STORAGE_KEY_USER_NAME, result.user.displayName);
+      } catch {}
+    }
+    if (token) {
+      setCachedGoogleToken(token);
+    }
+    return { user: result.user, accessToken: token };
+  } catch (error: any) {
+    const code = String(error?.code || '');
     // Only fallback to redirect if running in a top-level window where popup was blocked
-    if (
-      isTopLevelWindow &&
-      (error?.code === 'auth/popup-blocked' || error?.message?.includes('popup-blocked'))
-    ) {
+    if (isTopLevelWindow && (code === 'auth/popup-blocked' || error?.message?.includes('popup-blocked'))) {
       await signInWithRedirect(auth, googleProvider);
       return null;
     }
 
-    // Gracefully handle user cancelling/closing popup or iframe environment limitations
+    // Gracefully handle user closing the popup
     if (
-      error?.code === 'auth/popup-closed-by-user' ||
-      error?.code === 'auth/cancelled-popup-request' ||
-      error?.code === 'auth/operation-not-supported-in-this-environment' ||
+      code === 'auth/popup-closed-by-user' ||
+      code === 'auth/cancelled-popup-request' ||
       error?.message?.includes('popup-closed-by-user') ||
-      error?.message?.includes('cancelled-popup-request') ||
-      error?.message?.includes('operation-not-supported-in-this-environment')
+      error?.message?.includes('cancelled-popup-request')
     ) {
       return null;
     }
-    throw error;
+
+    throw formatGoogleAuthError(error);
   }
 }
 
@@ -449,11 +495,11 @@ export async function logOut(): Promise<void> {
 }
 
 export function getCachedDriveToken(): string | null {
-  return cachedGoogleToken;
+  return getCachedGoogleToken();
 }
 
 export function setCachedDriveToken(token: string | null) {
-  cachedGoogleToken = token;
+  setCachedGoogleToken(token);
 }
 
 // Helper to always resolve the authenticated Firebase UID and prevent writes to 'local-user'

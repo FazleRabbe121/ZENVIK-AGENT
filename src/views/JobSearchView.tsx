@@ -49,6 +49,7 @@ import {
   QuickCountryFilterKey,
   searchCountriesByName,
 } from '../services/countryDatabase';
+import { getMultiUserSessionToken } from '../services/multiUserService';
 import {
   buildEnrichedJobEntities,
   searchJobs,
@@ -578,7 +579,9 @@ export const JobSearchView: React.FC<JobSearchViewProps> = ({
   // Fetch Admin & Cooperative AI Diagnostics
   const fetchDiagnostics = async () => {
     try {
-      const res = await fetch('/api/admin/diagnostics');
+      const token = getMultiUserSessionToken();
+      const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      const res = await fetch('/api/admin/diagnostics', { headers });
       if (res.ok) {
         const data = await res.json();
         setDiagnosticsData(data);
@@ -589,9 +592,14 @@ export const JobSearchView: React.FC<JobSearchViewProps> = ({
   const runDiagnosticAction = async (action: string) => {
     setDiagActionLoading(action);
     try {
+      const token = getMultiUserSessionToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      };
       const res = await fetch('/api/admin/diagnostics/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ action }),
       });
       if (res.ok) {

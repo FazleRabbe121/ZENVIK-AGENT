@@ -15,6 +15,7 @@ import {
   Award,
   Wallet,
   Smartphone,
+  GraduationCap,
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { NavTab } from './SidebarNav';
@@ -39,6 +40,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
     { id: 'apps-center', label: 'Apps', icon: Smartphone },
     { id: 'finance', label: 'Finance', icon: Wallet },
     { id: 'personal-ai', label: 'Personal AI', icon: Cpu },
+    { id: 'english-master', label: 'English', icon: GraduationCap },
     { id: 'recipe-book', label: 'Recipe Book', icon: UtensilsCrossed },
     { id: 'certificate', label: 'Certificate', icon: Award },
     { id: 'europe-jobs', label: 'Europe', icon: Globe },

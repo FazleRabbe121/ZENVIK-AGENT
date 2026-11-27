@@ -265,7 +265,7 @@ function loadStore(): PersonalAIChatStoreData {
         content: `Hello! I am your **Personal AI Assistant** — a general-purpose, multimodal intelligence workspace.\n\nঅভিনন্দন! আপনি বাংলা এবং ইংরেজি — উভয় ভাষাতেই আমার সাথে স্বাভাবিকভাবে কথা বলতে পারেন।\n\nHere is what we can do together:\n- **General Questions, Research & Brainstorming**: Coding, mathematics, hospitality & mixology science, business strategy, and daily productivity.\n- **Natural Bengali & English**: Write in Bengali (\`বাংলা\`), English, or a mix of both — I will respond naturally and translate whenever needed.\n- **Real Vision & Image Analysis**: Upload photos, handwritten notes, documents, screenshots, or food/drink images for instant OCR and visual breakdown.\n- **Connected Workspace Tools**: Connect **Google Sheets**, **Google Docs**, **Google Drive**, **Gmail**, or custom APIs to read, search (e.g., find *"Mango"* in a sheet), summarize, or update records with full confirmation control.\n\nHow can I help you today? আজ আপনাকে কীভাবে সাহায্য করতে পারি?`,
         createdAt: new Date().toISOString(),
         providerUsed: 'gemini',
-        modelUsed: 'gemini-3.8-flash',
+        modelUsed: 'gemini-4-hydrogen',
       },
     ],
   };
@@ -326,6 +326,7 @@ export function getAIProvidersStatus() {
   const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim().length > 5);
   const hasOpenAI = hasOpenAIKey && !openAICreditsExhausted;
   const hasGemini = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 5);
+  const hasGrok = Boolean((process.env.GROK_API_KEY || process.env.XAI_API_KEY || '').trim().length > 5);
 
   return {
     openai: {
@@ -343,12 +344,20 @@ export function getAIProvidersStatus() {
     gemini: {
       configured: hasGemini,
       status: hasGemini ? 'connected' : 'not_configured',
-      models: ['gemini-3.8-flash'],
-      defaultModel: 'gemini-3.8-flash',
+      models: ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'],
+      defaultModel: 'gemini-4-hydrogen',
       supportsVision: true,
       supportsStreaming: true,
     },
-    activePrimaryProvider: hasOpenAI ? 'openai' : hasGemini ? 'gemini' : 'unavailable',
+    grok: {
+      configured: hasGrok,
+      status: hasGrok ? 'connected' : 'not_configured',
+      models: ['grok-2-latest', 'grok-3-mini'],
+      defaultModel: 'grok-2-latest',
+      supportsVision: false,
+      supportsStreaming: false,
+    },
+    activePrimaryProvider: hasOpenAI ? 'openai' : hasGemini ? 'gemini' : hasGrok ? 'grok' : 'unavailable',
   };
 }
 
@@ -1166,11 +1175,42 @@ personalAIChatRouter.post('/integrations/:id/status', (req: Request, res: Respon
 });
 
 // Register a New Custom API / Webhook / Database Tool Integration
+function validateSafeExternalEndpointUrl(rawUrl?: string): { valid: boolean; normalized: string; error?: string } {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return { valid: true, normalized: '' };
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:') {
+      return { valid: false, normalized: '', error: 'Custom endpoint URL must use HTTPS.' };
+    }
+    const host = parsed.hostname.toLowerCase();
+    const blockedHosts = ['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]', 'metadata.google.internal'];
+    if (
+      blockedHosts.includes(host) ||
+      host.startsWith('169.254.') ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal')
+    ) {
+      return { valid: false, normalized: '', error: 'Private, loopback, or cloud metadata addresses are not allowed.' };
+    }
+    return { valid: true, normalized: parsed.toString() };
+  } catch {
+    return { valid: false, normalized: '', error: 'Custom endpoint URL is not a valid URL.' };
+  }
+}
+
 personalAIChatRouter.post('/integrations/custom', (req: Request, res: Response) => {
   chatStore = loadStore();
   const { name, category = 'custom_api', description, customEndpointUrl, capabilities = [] } = req.body || {};
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Tool name is required.' });
+  }
+  const urlValidation = validateSafeExternalEndpointUrl(customEndpointUrl);
+  if (!urlValidation.valid) {
+    return res.status(400).json({ error: urlValidation.error });
   }
 
   const newTool: WorkspaceToolIntegration = {

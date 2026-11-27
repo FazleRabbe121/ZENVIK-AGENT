@@ -1715,33 +1715,31 @@ export function resolveVerifiedEmployerEmail(
     };
   }
 
-  // 1b. Never invent or accept generic consumer @gmail.com / @yahoo.com / @hotmail.com addresses as employer HR contacts
-  // (Allow only the authorized self-test addresses fazle.rabbe.doc@gmail.com and fazlerabbe905@gmail.com for diagnostic self-tests)
+  // 1b. Flag consumer webmail domains as Unverified (informational warning) rather than hard-blocking small employers or self-tests
   const isAuthorizedSelfTest = clean === 'fazle.rabbe.doc@gmail.com' || clean === 'fazlerabbe905@gmail.com';
   const isConsumerWebmail = /@(?:gmail|googlemail|yahoo|hotmail|outlook|live|icloud|aol|protonmail)\.com$/i.test(clean);
   if (clean && isConsumerWebmail && !isAuthorizedSelfTest) {
     const portalUrl = jobUrl || inferOfficialPortalUrl('', empClean);
     return {
       originalEmail: clean,
-      verifiedEmail: '',
-      wasCorrected: true,
-      isDeliverable: false,
-      verificationSource: 'Unverified Consumer Webmail Rejected',
+      verifiedEmail: clean,
+      wasCorrected: false,
+      isDeliverable: true,
+      verificationSource: 'Direct Email (Unverified Consumer Webmail)',
       sourceUrl: portalUrl,
-      foundOnPage: 'Unverified personal/consumer webmail domain blocked',
+      foundOnPage: 'User-entered or vacancy email address',
       contactType: 'Unverified Contact',
       verificationDate: todayIso,
-      confidence: 'None',
+      confidence: 'Medium',
       contactStatus: 'Unverified',
-      officialPortalUrl: portalUrl,
-      bouncePreventionNote: `Unverified contact rejected: "${clean}" uses a consumer webmail domain rather than an official verified employer domain. Apply via the official vacancy link instead.`,
+      officialPortalUrl: portalUrl || undefined,
+      bouncePreventionNote: `Note: "${clean}" uses a consumer webmail domain. Double-check the address before sending.`,
     };
   }
 
-  // 2. Reject reception, reservations, concierge, restaurant booking, or customer-service emails
-  // unless the vacancy explicitly identifies that address as the official application channel
+  // 2. If a non-hiring alias (reception/reservations) has a known verified HR replacement for this employer, upgrade it;
+  // otherwise keep it deliverable with an Unverified warning instead of hard-blocking custom addresses
   if (clean && NON_HIRING_PREFIX_REGEX.test(clean) && !explicitlyStated) {
-    // Check if we know the official HR email for this employer
     if (empClean) {
       for (const fb of EMPLOYER_NAME_VERIFIED_FALLBACKS) {
         if (fb.match.test(empClean)) {
@@ -1767,19 +1765,18 @@ export function resolveVerifiedEmployerEmail(
     const portalUrl = jobUrl || inferOfficialPortalUrl(clean, empClean);
     return {
       originalEmail: clean,
-      verifiedEmail: '',
-      wasCorrected: true,
-      isDeliverable: false,
-      verificationSource: 'Hiring Contact Quality Filter (Non-HR Alias Blocked)',
+      verifiedEmail: clean,
+      wasCorrected: false,
+      isDeliverable: true,
+      verificationSource: 'General Contact (Unverified HR Inbox)',
       sourceUrl: portalUrl,
-      foundOnPage: 'Non-recruitment department alias rejected',
-      contactType: 'No Verified Hiring Contact',
+      foundOnPage: 'User-entered or general property contact',
+      contactType: 'Unverified Contact',
       verificationDate: todayIso,
-      confidence: 'None',
+      confidence: 'Medium',
       contactStatus: 'Unverified',
-      officialPortalUrl: portalUrl,
-      bouncePreventionNote: `Unverified contact: "${clean}" is a reception, reservations, concierge, or customer-service address rather than a verified HR/recruitment contact. Please provide a verified hiring email or apply via the official employer portal.`,
-      isNonHiringAliasRejected: true,
+      officialPortalUrl: portalUrl || undefined,
+      bouncePreventionNote: `Note: "${clean}" looks like a general/reception email. Verify whether this employer accepts applications here.`,
     };
   }
 
@@ -1867,8 +1864,7 @@ export function resolveVerifiedEmployerEmail(
     };
   }
 
-  // 6. Any other address not in the verified registry is explicitly labeled "Unverified"
-  // and never presented as a confirmed HR contact.
+  // 6. Any other syntactically valid email address is deliverable (marked Unverified if not in curated registry)
   const isExplicitHrPrefix = /^(?:hr|hrdpt|careers?|jobs?|jobb|posao|recruitment|recrutement|talent|people|personal|karriere|humanresources|hiring|apply|applications?|staffing|work)(?:[._-][a-z0-9]+)*@/i.test(
     clean
   );
@@ -1877,17 +1873,19 @@ export function resolveVerifiedEmployerEmail(
     originalEmail: clean,
     verifiedEmail: clean,
     wasCorrected: false,
-    isDeliverable: isExplicitHrPrefix,
-    verificationSource: 'Unverified Contact (Not in Official HR Registry — Official Vacancy Link Prioritized)',
+    isDeliverable: true,
+    verificationSource: isExplicitHrPrefix
+      ? 'Employer HR / Careers Contact'
+      : 'Direct Employer Email (Unverified)',
     sourceUrl: jobUrl || `https://${clean.split('@')[1] || ''}`,
-    foundOnPage: 'Unverified Contact — Prioritize Official Application Link',
-    contactType: 'Unverified Contact',
+    foundOnPage: 'Direct Employer / Vacancy Email',
+    contactType: isExplicitHrPrefix ? 'Official Vacancy Channel' : 'Unverified Contact',
     verificationDate: todayIso,
-    confidence: isExplicitHrPrefix ? 'Medium' : 'None',
+    confidence: isExplicitHrPrefix ? 'Medium' : 'Medium',
     contactStatus: 'Unverified',
     officialPortalUrl: jobUrl || inferOfficialPortalUrl(clean, empClean) || undefined,
     bouncePreventionNote: isExplicitHrPrefix
-      ? 'Contact is unverified against our confirmed HR registry. Prioritize the official application link when available.'
-      : 'Unverified contact address. Do not assume this email is an active HR inbox — use the official vacancy application link.',
+      ? undefined
+      : 'Custom employer address — confirm it is the correct hiring contact for this vacancy.',
   };
 }

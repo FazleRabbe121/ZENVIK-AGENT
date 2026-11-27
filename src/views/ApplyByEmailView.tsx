@@ -62,6 +62,7 @@ import {
   formatTrackingStatusLabel,
   getPreservedFailedApplication,
   syncAllGmailDeliveryStatuses,
+  GmailService,
 } from '../services/gmailService';
 import {
   loadCentralProfile,
@@ -247,13 +248,21 @@ export const ApplyByEmailView: React.FC<ApplyByEmailViewProps> = ({
     country?: string;
   } | null>(null);
 
-  // Monitor auth state changes
+  // Monitor auth state & unified Gmail connection changes across all views
   useEffect(() => {
+    const syncConn = () => {
+      setCurrentUser(auth.currentUser);
+      setHasToken(!!getCachedGoogleToken() && !isGoogleTokenExpired());
+    };
     const unsub = auth.onAuthStateChanged(u => {
       setCurrentUser(u);
       setHasToken(!!getCachedGoogleToken() && !isGoogleTokenExpired());
     });
-    return () => unsub();
+    window.addEventListener('gmail_connection_updated', syncConn);
+    return () => {
+      unsub();
+      window.removeEventListener('gmail_connection_updated', syncConn);
+    };
   }, []);
 
   // Persistent Gmail Outbox Queue State (survives page reload, 1-at-a-time, 45-120s gap, 40/day cap)
@@ -481,32 +490,42 @@ export const ApplyByEmailView: React.FC<ApplyByEmailViewProps> = ({
   const handleConnectGmail = async (): Promise<boolean> => {
     setIsConnectingGmail(true);
     try {
-      const res = await signInWithGoogle();
-      if (res && res.accessToken) {
+      const connRes = await GmailService.connectGmailAccount();
+      if (connRes.connected && getCachedGoogleToken()) {
+        const user = auth.currentUser;
         setHasToken(true);
-        setCurrentUser(res.user);
+        setCurrentUser(user);
 
         // Safe profile synchronization: restore user's saved master cover letter, templates & history
-        const synced = await syncCloudCentralProfile(res.user.uid, res.user.email || '');
-        if (synced) {
-          if (synced.masterCoverLetter) setCoverLetter(synced.masterCoverLetter);
-          if (synced.defaultEmailSubject) setSubject(synced.defaultEmailSubject);
-          if (Array.isArray(synced.sendingHistory) && synced.sendingHistory.length > 0) {
-            setSendingHistory(synced.sendingHistory);
+        if (user?.uid) {
+          const synced = await syncCloudCentralProfile(user.uid, user.email || connRes.email || '');
+          if (synced) {
+            if (synced.masterCoverLetter) setCoverLetter(synced.masterCoverLetter);
+            if (synced.defaultEmailSubject) setSubject(synced.defaultEmailSubject);
+            if (Array.isArray(synced.sendingHistory) && synced.sendingHistory.length > 0) {
+              setSendingHistory(synced.sendingHistory);
+            }
           }
         }
 
-        showToast(`Connected to Gmail as ${res.user.email}! Saved profile & history restored.`, 'success');
-        return true;
-      } else if (res) {
-        setHasToken(true);
-        showToast('Gmail connected successfully.', 'success');
+        showToast(
+          `Connected to Gmail as ${connRes.email || user?.email || 'your account'}! Ready to send applications.`,
+          'success'
+        );
         return true;
       }
+
+      setHasToken(false);
+      showToast(
+        connRes.error ||
+          'Gmail authorization did not complete. Please allow popups and grant Gmail send permission.',
+        'error'
+      );
       return false;
     } catch (err: any) {
       console.warn('Gmail connection note:', err?.message || err);
-      showToast(err.message || 'Failed to connect Gmail. Please try again.', 'error');
+      setHasToken(false);
+      showToast(err?.message || 'Failed to connect Gmail. Please try again.', 'error');
       return false;
     } finally {
       setIsConnectingGmail(false);
@@ -723,6 +742,7 @@ Fazle Rabbi Boyati`);
 
     let enqueuedCount = 0;
     let skippedDuplicateCount = 0;
+    let blockedReason = '';
 
     for (let i = 0; i < validRecipients.length; i++) {
       const rec = validRecipients[i];
@@ -734,7 +754,7 @@ Fazle Rabbi Boyati`);
         continue;
       }
 
-      persistentGmailQueueEngine.enqueue({
+      const enqueueRes = persistentGmailQueueEngine.enqueue({
         jobId: handoffJobMeta?.jobId || `manual-${Date.now()}-${i}`,
         market: 'europe',
         recipient: cleanEmail,
@@ -752,15 +772,20 @@ Fazle Rabbi Boyati`);
             }
           : undefined,
       });
-      enqueuedCount++;
+      if (enqueueRes.success) {
+        enqueuedCount++;
+      } else if (enqueueRes.reason) {
+        blockedReason = enqueueRes.reason;
+      }
     }
 
     if (enqueuedCount === 0) {
       showToast(
-        skippedDuplicateCount > 0
-          ? `All ${skippedDuplicateCount} recipient email address(es) were already contacted previously. Never sending to the same email twice.`
-          : 'No new recipients to enqueue.',
-        'info'
+        blockedReason ||
+          (skippedDuplicateCount > 0
+            ? `All ${skippedDuplicateCount} recipient email address(es) were already contacted previously. Never sending to the same email twice.`
+            : 'No new recipients to enqueue.'),
+        blockedReason ? 'error' : 'info'
       );
       return;
     }

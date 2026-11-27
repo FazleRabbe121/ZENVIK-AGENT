@@ -166,16 +166,23 @@ export const BulkQueueView: React.FC<BulkQueueViewProps> = ({ onOpenGmailCenter 
   };
 
   useEffect(() => {
+    const syncSenders = () => {
+      setSenderAccounts(loadAuthorizedSenderAccounts());
+      setActiveSender(getActiveSenderAccount());
+    };
     const unsub = persistentGmailQueueEngine.subscribe(updated => {
       setQueueItems(updated);
       const state = persistentGmailQueueEngine.getState();
       setIsProcessing(state.isProcessing);
       setIsPaused(state.isPaused);
-      setSenderAccounts(loadAuthorizedSenderAccounts());
-      setActiveSender(getActiveSenderAccount());
+      syncSenders();
       syncQueueToPreparedStorage(updated);
     });
-    return () => unsub();
+    window.addEventListener('gmail_connection_updated', syncSenders);
+    return () => {
+      unsub();
+      window.removeEventListener('gmail_connection_updated', syncSenders);
+    };
   }, []);
 
   // Also merge any historical sent/bounced records from Sending History into the unified Delivery Center view

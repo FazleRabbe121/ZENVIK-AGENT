@@ -2,7 +2,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import type { AIVerificationRecord, SponsorshipVerificationLevel } from '../types/jobEntities';
 
 export interface AIProviderMetrics {
-  provider: 'Gemini' | 'OpenAI';
+  provider: 'Gemini' | 'OpenAI' | 'Grok';
   configured: boolean;
   status: 'connected' | 'missing_api_key' | 'rate_limited' | 'error' | 'standby';
   model: string;
@@ -60,7 +60,7 @@ class AICooperativeEngine {
     provider: 'OpenAI',
     configured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim()),
     status: process.env.OPENAI_API_KEY ? 'standby' : 'missing_api_key',
-    model: 'gpt-4o-mini',
+    model: process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini',
     availableModels: ['gpt-4o-mini', 'gpt-4o'],
     totalRequests: 0,
     successfulRequests: 0,
@@ -73,15 +73,38 @@ class AICooperativeEngine {
     recentLogs: [],
   };
 
+  private grokMetrics: AIProviderMetrics = {
+    provider: 'Grok',
+    configured: Boolean((process.env.GROK_API_KEY || process.env.XAI_API_KEY || '').trim()),
+    status: (process.env.GROK_API_KEY || process.env.XAI_API_KEY || '').trim() ? 'standby' : 'missing_api_key',
+    model: process.env.GROK_MODEL?.trim() || 'grok-2-latest',
+    availableModels: ['grok-2-latest', 'grok-3-mini', 'grok-3'],
+    totalRequests: 0,
+    successfulRequests: 0,
+    failedRequests: 0,
+    rateLimitCount: 0,
+    totalTokensUsed: 0,
+    avgLatencyMs: 0,
+    lastCheckedAt: null,
+    lastError: null,
+    recentLogs: [],
+  };
+
+  private getMetricsForProvider(provider: 'Gemini' | 'OpenAI' | 'Grok'): AIProviderMetrics {
+    if (provider === 'Gemini') return this.geminiMetrics;
+    if (provider === 'OpenAI') return this.openaiMetrics;
+    return this.grokMetrics;
+  }
+
   private recordProviderLog(
-    provider: 'Gemini' | 'OpenAI',
+    provider: 'Gemini' | 'OpenAI' | 'Grok',
     operation: string,
     status: 'success' | 'error' | 'fallback',
     latencyMs: number,
     detail: string,
     tokensEstimate: number = 0
   ) {
-    const metrics = provider === 'Gemini' ? this.geminiMetrics : this.openaiMetrics;
+    const metrics = this.getMetricsForProvider(provider);
     metrics.totalRequests += 1;
     if (status === 'success') {
       metrics.successfulRequests += 1;
@@ -116,8 +139,8 @@ class AICooperativeEngine {
     }
   }
 
-  public setProviderModel(provider: 'Gemini' | 'OpenAI', model: string) {
-    const metrics = provider === 'Gemini' ? this.geminiMetrics : this.openaiMetrics;
+  public setProviderModel(provider: 'Gemini' | 'OpenAI' | 'Grok', model: string) {
+    const metrics = this.getMetricsForProvider(provider);
     if (metrics.availableModels.includes(model)) {
       metrics.model = model;
     }
@@ -126,22 +149,36 @@ class AICooperativeEngine {
   public getProviderStatusSummary() {
     this.geminiMetrics.configured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
     this.openaiMetrics.configured = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim());
+    this.grokMetrics.configured = Boolean((process.env.GROK_API_KEY || process.env.XAI_API_KEY || '').trim());
     if (!this.geminiMetrics.configured && this.geminiMetrics.status === 'standby') {
       this.geminiMetrics.status = 'missing_api_key';
     }
     if (!this.openaiMetrics.configured && this.openaiMetrics.status === 'standby') {
       this.openaiMetrics.status = 'missing_api_key';
     }
+    if (!this.grokMetrics.configured && this.grokMetrics.status === 'standby') {
+      this.grokMetrics.status = 'missing_api_key';
+    }
+    const activeCount = [
+      this.geminiMetrics.configured,
+      this.openaiMetrics.configured,
+      this.grokMetrics.configured,
+    ].filter(Boolean).length;
     return {
       gemini: { ...this.geminiMetrics },
       openai: { ...this.openaiMetrics },
+      grok: { ...this.grokMetrics },
       cooperativeMode:
-        this.geminiMetrics.configured && this.openaiMetrics.configured
+        activeCount === 3
+          ? 'tri_provider_active'
+          : this.geminiMetrics.configured && this.openaiMetrics.configured
           ? 'dual_active'
           : this.geminiMetrics.configured
           ? 'gemini_primary_with_deterministic_verifier'
           : this.openaiMetrics.configured
           ? 'openai_primary_with_deterministic_verifier'
+          : this.grokMetrics.configured
+          ? 'grok_primary_with_deterministic_verifier'
           : 'deterministic_evidence_engine',
     };
   }
@@ -338,6 +375,91 @@ class AICooperativeEngine {
         model: this.openaiMetrics.model,
         latencyMs: latency,
         message: `OpenAI API check failed: ${errMsg}`,
+      };
+    }
+  }
+
+  /**
+   * Real health check for Grok (xAI) API using process.env.GROK_API_KEY or XAI_API_KEY.
+   * Never fakes connection success if API key is absent or invalid.
+   */
+  public async testGrokConnection(): Promise<{
+    connected: boolean;
+    provider: 'Grok';
+    model: string;
+    latencyMs: number;
+    message: string;
+  }> {
+    const start = Date.now();
+    const apiKey = (process.env.GROK_API_KEY || process.env.XAI_API_KEY || '').trim();
+    if (!apiKey) {
+      this.grokMetrics.configured = false;
+      this.grokMetrics.status = 'missing_api_key';
+      const msg =
+        'GROK_API_KEY / XAI_API_KEY is not configured in environment variables. Cross-verification falls back cleanly to Gemini + Deterministic Verifier.';
+      this.recordProviderLog('Grok', 'health_check', 'fallback', Date.now() - start, msg);
+      return {
+        connected: false,
+        provider: 'Grok',
+        model: this.grokMetrics.model,
+        latencyMs: Date.now() - start,
+        message: msg,
+      };
+    }
+
+    try {
+      const res = await this.withRetryBackoff(() =>
+        this.withTimeout(
+          fetch('https://api.x.ai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: this.grokMetrics.model,
+              messages: [{ role: 'user', content: 'Respond with JSON: {"status":"ok"}' }],
+              max_tokens: 30,
+              temperature: 0,
+            }),
+          }),
+          10000,
+          'Grok health check'
+        )
+      );
+
+      const latency = Date.now() - start;
+      if (!res.ok) {
+        const bodyText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${bodyText.slice(0, 140)}`);
+      }
+      const data: any = await res.json();
+      const tokens = data?.usage?.total_tokens || 35;
+      this.recordProviderLog(
+        'Grok',
+        'health_check',
+        'success',
+        latency,
+        `Grok (${this.grokMetrics.model}) verified`,
+        tokens
+      );
+      return {
+        connected: true,
+        provider: 'Grok',
+        model: this.grokMetrics.model,
+        latencyMs: latency,
+        message: `Grok (${this.grokMetrics.model}) responded in ${latency}ms.`,
+      };
+    } catch (err: any) {
+      const latency = Date.now() - start;
+      const errMsg = err?.message || String(err);
+      this.recordProviderLog('Grok', 'health_check', 'error', latency, errMsg);
+      return {
+        connected: false,
+        provider: 'Grok',
+        model: this.grokMetrics.model,
+        latencyMs: latency,
+        message: `Grok API check failed: ${errMsg}`,
       };
     }
   }

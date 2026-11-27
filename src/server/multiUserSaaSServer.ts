@@ -204,9 +204,11 @@ export interface MultiUserNotificationRecord {
 export interface AdminAISettingsConfig {
   geminiEnabled: boolean;
   openaiEnabled: boolean;
-  defaultProvider: 'Gemini' | 'OpenAI';
+  grokEnabled?: boolean;
+  defaultProvider: 'Gemini' | 'OpenAI' | 'Grok';
   geminiModel: string;
   openaiModel: string;
+  grokModel?: string;
   fallbackEnabled: boolean;
   rateLimitPerMinute: number;
   activeJobSources: string[];
@@ -277,13 +279,39 @@ declare global {
 // 1. AES-256-GCM TOKEN ENCRYPTION AT REST
 // ============================================================================
 
+let cachedRuntimeFallbackSecret: string | null = null;
+
+function getOrCreateRuntimeFallbackSecret(): string {
+  if (cachedRuntimeFallbackSecret) return cachedRuntimeFallbackSecret;
+  const secretFile = path.join(DATA_DIR, '.zenvik_runtime_secret');
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(secretFile)) {
+      const existing = fs.readFileSync(secretFile, 'utf8').trim();
+      if (existing.length >= 32) {
+        cachedRuntimeFallbackSecret = existing;
+        return existing;
+      }
+    }
+    const generated = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(secretFile, generated, { encoding: 'utf8', mode: 0o600 });
+    cachedRuntimeFallbackSecret = generated;
+    return generated;
+  } catch {
+    cachedRuntimeFallbackSecret = crypto.randomBytes(32).toString('hex');
+    return cachedRuntimeFallbackSecret;
+  }
+}
+
 function getDerivedEncryptionKey(secretOverride?: string): Buffer {
   const rawSecret =
     secretOverride ||
-    process.env.TOKEN_ENCRYPTION_KEY ||
-    process.env.GOOGLE_CLIENT_SECRET ||
-    process.env.AGENT_SCHEDULER_SECRET ||
-    `zenvik-kms-fallback-key-${(firebaseConfig as any).projectId || 'ccd'}`;
+    process.env.TOKEN_ENCRYPTION_KEY?.trim() ||
+    process.env.GOOGLE_CLIENT_SECRET?.trim() ||
+    process.env.AGENT_SCHEDULER_SECRET?.trim() ||
+    getOrCreateRuntimeFallbackSecret();
   return crypto.createHash('sha256').update(String(rawSecret), 'utf8').digest();
 }
 
@@ -397,26 +425,69 @@ export function verifySessionToken(token: string): {
   }
 }
 
+const FIREBASE_CERTS_URL =
+  'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
+let cachedFirebaseCerts: Record<string, string> = {};
+let cachedFirebaseCertsExpiresAt = 0;
+
+async function fetchFirebasePublicCerts(): Promise<Record<string, string>> {
+  if (Date.now() < cachedFirebaseCertsExpiresAt && Object.keys(cachedFirebaseCerts).length > 0) {
+    return cachedFirebaseCerts;
+  }
+  const res = await fetch(FIREBASE_CERTS_URL);
+  if (!res.ok) {
+    throw new Error(`Unable to fetch Firebase public certificates (HTTP ${res.status})`);
+  }
+  const certs = (await res.json()) as Record<string, string>;
+  const cacheControl = res.headers.get('cache-control') || '';
+  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/i);
+  const maxAgeSec = maxAgeMatch ? Math.min(3600, Math.max(60, parseInt(maxAgeMatch[1], 10))) : 900;
+  cachedFirebaseCerts = certs;
+  cachedFirebaseCertsExpiresAt = Date.now() + maxAgeSec * 1000;
+  return certs;
+}
+
 /**
- * Decodes and validates a Firebase ID token JWT if the client authenticates via Firebase Auth.
+ * Cryptographically verifies a Firebase Auth RS256 ID token JWT against Google's official X.509 certificates.
+ * Rejects unsigned, forged, expired, or wrong-project tokens.
  */
-function parseVerifiedFirebaseJwt(idToken: string): {
+export async function verifyFirebaseIdToken(idToken: string): Promise<{
   uid: string;
   email: string;
   name?: string;
-} | null {
+} | null> {
   try {
+    if (!idToken || typeof idToken !== 'string') return null;
     const parts = idToken.split('.');
     if (parts.length !== 3) return null;
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-    const expectedProjectId = (firebaseConfig as any).projectId;
-    if (!payload.sub || !payload.email) return null;
-    if (expectedProjectId && payload.aud && payload.aud !== expectedProjectId) {
+    const [encodedHeader, encodedPayload, encodedSignature] = parts;
+    const header = JSON.parse(Buffer.from(encodedHeader, 'base64url').toString('utf8'));
+    if (header.alg !== 'RS256' || !header.kid) return null;
+
+    const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+    const expectedProjectId = (process.env.FIREBASE_PROJECT_ID || (firebaseConfig as any).projectId || '').trim();
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    if (!payload.sub || typeof payload.sub !== 'string' || !payload.email || typeof payload.email !== 'string') {
       return null;
     }
-    if (payload.exp && Date.now() / 1000 > Number(payload.exp) + 60) {
-      return null;
+    if (expectedProjectId) {
+      if (payload.aud !== expectedProjectId) return null;
+      if (payload.iss !== `https://securetoken.google.com/${expectedProjectId}`) return null;
     }
+    if (!payload.exp || nowSec >= Number(payload.exp)) return null;
+    if (payload.iat && Number(payload.iat) > nowSec + 300) return null;
+
+    const certs = await fetchFirebasePublicCerts();
+    const pemCert = certs[String(header.kid)];
+    if (!pemCert) return null;
+
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(`${encodedHeader}.${encodedPayload}`);
+    verifier.end();
+    const signatureValid = verifier.verify(pemCert, Buffer.from(encodedSignature, 'base64url'));
+    if (!signatureValid) return null;
+
     return {
       uid: String(payload.sub),
       email: String(payload.email).toLowerCase(),
@@ -425,6 +496,15 @@ function parseVerifiedFirebaseJwt(idToken: string): {
   } catch {
     return null;
   }
+}
+
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ============================================================================
@@ -497,9 +577,11 @@ export class MultiUserSaaSStorage {
       adminSettings: {
         geminiEnabled: true,
         openaiEnabled: true,
+        grokEnabled: true,
         defaultProvider: 'Gemini',
         geminiModel: 'gemini-4-hydrogen',
         openaiModel: 'gpt-4o-mini',
+        grokModel: 'grok-2-latest',
         fallbackEnabled: true,
         rateLimitPerMinute: 240,
         activeJobSources: [
@@ -726,14 +808,16 @@ export function buildMimeEmailWithAttachment(params: {
 }): string {
   const boundary = `zenvik_mime_boundary_${crypto.randomBytes(12).toString('hex')}`;
   const cleanSubject = params.subject.replace(/[\r\n]+/g, ' ').trim();
+  const safeFromEmail = params.fromEmail.replace(/[\r\n<>]+/g, '').trim();
+  const safeToEmail = params.toEmail.replace(/[\r\n<>]+/g, '').trim();
   const encodedSubject = `=?UTF-8?B?${Buffer.from(cleanSubject, 'utf8').toString('base64')}?=`;
   const fromHeader = params.fromName
-    ? `"${params.fromName.replace(/"/g, '')}" <${params.fromEmail}>`
-    : params.fromEmail;
+    ? `"${params.fromName.replace(/["\r\n]/g, '')}" <${safeFromEmail}>`
+    : safeFromEmail;
 
   const lines: string[] = [
     `From: ${fromHeader}`,
-    `To: ${params.toEmail}`,
+    `To: ${safeToEmail}`,
     `Subject: ${encodedSubject}`,
     'MIME-Version: 1.0',
   ];
@@ -806,9 +890,11 @@ export interface GmailTransportOverrides {
 export function createMultiUserSaaSRouter(options?: {
   dbFilePath?: string;
   transport?: GmailTransportOverrides;
+  verifyFirebaseToken?: (idToken: string) => Promise<{ uid: string; email: string; name?: string } | null>;
 }) {
   const storage = new MultiUserSaaSStorage(options?.dbFilePath);
   const router = express.Router();
+  const firebaseTokenVerifier = options?.verifyFirebaseToken || verifyFirebaseIdToken;
 
   function getOAuthCredentials(req?: Request) {
     const clientId = (process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || '').trim();
@@ -960,7 +1046,7 @@ export function createMultiUserSaaSRouter(options?: {
     return null;
   }
 
-  function requireAuthenticatedUser(req: Request, res: Response, next: NextFunction) {
+  async function requireAuthenticatedUser(req: Request, res: Response, next: NextFunction) {
     const rawToken = extractTokenFromRequest(req);
     if (!rawToken) {
       storage.getState().systemStats.totalAuthErrors += 1;
@@ -977,8 +1063,8 @@ export function createMultiUserSaaSRouter(options?: {
     if (verifiedSession) {
       userRecord = storage.findUserById(verifiedSession.userId);
     } else {
-      // 2. Check Firebase Auth ID Token JWT
-      const firebaseClaims = parseVerifiedFirebaseJwt(rawToken);
+      // 2. Cryptographically verify Firebase Auth RS256 ID Token JWT
+      const firebaseClaims = await firebaseTokenVerifier(rawToken);
       if (firebaseClaims) {
         userRecord = storage.upsertFirebaseUser({
           uid: firebaseClaims.uid,
@@ -1173,26 +1259,34 @@ export function createMultiUserSaaSRouter(options?: {
   });
 
   /**
-   * Syncs a Firebase Auth user login into the Multi-User SaaS backend and returns a backend session token.
+   * Syncs a cryptographically verified Firebase Auth user login into the Multi-User SaaS backend
+   * and returns a signed backend session token. Rejects unverified or missing Firebase ID tokens.
    * Note: Application login is strictly separate from Gmail sending authorization.
    */
-  router.post('/multiuser/auth/firebase-sync', (req: Request, res: Response) => {
+  router.post('/multiuser/auth/firebase-sync', async (req: Request, res: Response) => {
     const rawToken = extractTokenFromRequest(req) || String(req.body?.idToken || '').trim();
-    const claims = rawToken ? parseVerifiedFirebaseJwt(rawToken) : null;
-    const fallbackUid = String(req.body?.uid || '').trim();
-    const fallbackEmail = String(req.body?.email || '').trim().toLowerCase();
-    const fallbackName = String(req.body?.displayName || '').trim();
-
-    const uid = claims?.uid || fallbackUid;
-    const email = claims?.email || fallbackEmail;
-    const displayName = claims?.name || fallbackName || email.split('@')[0];
-
-    if (!uid || !email || !email.includes('@')) {
-      return res.status(400).json({
-        error: 'INVALID_FIREBASE_IDENTITY',
-        message: 'Valid Firebase user UID and email are required.',
+    if (!rawToken) {
+      storage.getState().systemStats.totalAuthErrors += 1;
+      return res.status(401).json({
+        error: 'INVALID_FIREBASE_TOKEN',
+        message: 'A cryptographically signed Firebase ID token is required.',
       });
     }
+
+    const claims = await firebaseTokenVerifier(rawToken);
+    if (!claims || !claims.uid || !claims.email || !claims.email.includes('@')) {
+      storage.getState().systemStats.totalAuthErrors += 1;
+      storage.appendLog('security', 'firebase_sync_rejected', 'Rejected invalid or forged Firebase ID token on /multiuser/auth/firebase-sync');
+      storage.save();
+      return res.status(401).json({
+        error: 'INVALID_FIREBASE_TOKEN',
+        message: 'Firebase ID token signature or claims could not be verified.',
+      });
+    }
+
+    const uid = claims.uid;
+    const email = claims.email.trim().toLowerCase();
+    const displayName = claims.name || String(req.body?.displayName || '').trim() || email.split('@')[0];
 
     const user = storage.upsertFirebaseUser({ uid, email, displayName });
     if (user.status === 'suspended') {
@@ -1651,18 +1745,19 @@ export function createMultiUserSaaSRouter(options?: {
       storage.save();
 
       if (req.accepts('html') && !req.xhr && req.query?.format !== 'json') {
+        const safeEmailHtml = escapeHtml(gmailAddress);
         return res.status(200).send(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Gmail Connected — ZENVIK-AGENT</title></head>
 <body style="background:#0B0C10;color:#F8FAFC;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;">
   <div style="background:#141822;border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:28px;max-width:420px;text-align:center;">
     <h2 style="color:#10B981;margin:0 0 8px;">Gmail Connected</h2>
-    <p style="font-size:14px;color:#94A3B8;margin:0 0 16px;">Authorized sender: <strong style="color:#fff;">${gmailAddress}</strong></p>
+    <p style="font-size:14px;color:#94A3B8;margin:0 0 16px;">Authorized sender: <strong style="color:#fff;">${safeEmailHtml}</strong></p>
     <p style="font-size:12px;color:#64748B;">This window will close automatically.</p>
   </div>
   <script>
     if (window.opener) {
-      window.opener.postMessage({ type: 'ZENVIK_GMAIL_OAUTH_SUCCESS', gmailAddress: ${JSON.stringify(gmailAddress)} }, '*');
+      window.opener.postMessage({ type: 'ZENVIK_GMAIL_OAUTH_SUCCESS', gmailAddress: ${JSON.stringify(gmailAddress)} }, window.location.origin);
       setTimeout(() => window.close(), 600);
     }
   </script>
@@ -1818,13 +1913,52 @@ export function createMultiUserSaaSRouter(options?: {
   // 4. PERSONAL GMAIL SENDING ENGINE (STRICT PER-USER SENDER & CV ISOLATION)
   // ==========================================================================
 
-  async function resolveValidUserAccessToken(userId: string): Promise<{
+  async function resolveValidUserAccessToken(
+    userId: string,
+    liveClientAccessToken?: string | null
+  ): Promise<{
     accessToken: string;
     gmailAddress: string;
     connection: StoredUserGmailConnection;
   }> {
     const state = storage.getState();
-    const conn = state.gmailConnections[userId];
+    const user = state.users[userId];
+    let conn = state.gmailConnections[userId];
+    const cleanLiveToken = typeof liveClientAccessToken === 'string' ? liveClientAccessToken.trim() : '';
+
+    // If the authenticated user supplied a fresh client-side Google OAuth access token via header,
+    // verify/use it directly and keep their connection record fresh so client-side popup OAuth never expires prematurely.
+    if (cleanLiveToken) {
+      let gmailAddress = conn?.gmailAddress || user?.email || '';
+      if (!gmailAddress || !gmailAddress.includes('@')) {
+        gmailAddress = (await transport.fetchGoogleUserEmail(cleanLiveToken)).trim().toLowerCase();
+      }
+      const now = new Date().toISOString();
+      const today = now.slice(0, 10);
+      conn = {
+        userId,
+        gmailAddress: gmailAddress.trim().toLowerCase(),
+        scopes: [GMAIL_SEND_ONLY_SCOPE],
+        encryptedAccessToken: encryptTokenAtRest(cleanLiveToken),
+        encryptedRefreshToken: conn?.encryptedRefreshToken || null,
+        accessTokenExpiresAt: Date.now() + 3600 * 1000,
+        connectedAt: conn?.connectedAt || now,
+        updatedAt: now,
+        status: 'connected',
+        lastError: null,
+        sentTodayCount: conn?.dailyQuotaDate === today ? conn.sentTodayCount : 0,
+        dailyQuotaDate: today,
+        dailyLimit: conn?.dailyLimit || user?.dailySendLimit || 40,
+      };
+      state.gmailConnections[userId] = conn;
+      storage.save();
+      return {
+        accessToken: cleanLiveToken,
+        gmailAddress: conn.gmailAddress,
+        connection: conn,
+      };
+    }
+
     if (!conn || conn.status === 'disconnected') {
       const err: any = new Error('You must connect your personal Gmail account before sending emails.');
       err.code = 'GMAIL_NOT_CONNECTED';
@@ -1904,6 +2038,7 @@ export function createMultiUserSaaSRouter(options?: {
     } | null;
     isRetry?: boolean;
     existingHistoryId?: string;
+    liveClientAccessToken?: string | null;
   }) {
     const state = storage.getState();
     const user = state.users[params.userId];
@@ -1922,7 +2057,10 @@ export function createMultiUserSaaSRouter(options?: {
     }
 
     // 1. Resolve the authenticated user's own Gmail connection (NEVER another user's or owner's Gmail)
-    const { accessToken, gmailAddress, connection } = await resolveValidUserAccessToken(params.userId);
+    const { accessToken, gmailAddress, connection } = await resolveValidUserAccessToken(
+      params.userId,
+      params.liveClientAccessToken
+    );
 
     // 2. Check daily sending quota for this user
     const today = new Date().toISOString().slice(0, 10);
@@ -2174,6 +2312,8 @@ export function createMultiUserSaaSRouter(options?: {
 
     const results: MultiUserEmailHistoryRecord[] = [];
     const errors: Array<{ recipientEmail: string; error: string; record?: MultiUserEmailHistoryRecord }> = [];
+    const liveClientAccessToken =
+      typeof req.headers['x-gmail-access-token'] === 'string' ? req.headers['x-gmail-access-token'].trim() : null;
 
     for (const item of recipientsInput) {
       const recipientEmail = typeof item === 'string' ? item : String(item?.recipientEmail || '');
@@ -2190,6 +2330,7 @@ export function createMultiUserSaaSRouter(options?: {
           coverLetter,
           cvId,
           inlineCv,
+          liveClientAccessToken,
         });
         results.push(record);
       } catch (err: any) {
@@ -2223,19 +2364,22 @@ export function createMultiUserSaaSRouter(options?: {
     const state = storage.getState();
     const conn = state.gmailConnections[userId];
     const user = state.users[userId];
+    const liveClientAccessToken =
+      typeof req.headers['x-gmail-access-token'] === 'string' ? req.headers['x-gmail-access-token'].trim() : null;
 
-    if (!conn || conn.status !== 'connected') {
+    if ((!conn || conn.status !== 'connected') && !liveClientAccessToken) {
       return res.status(400).json({
         error: 'GMAIL_NOT_CONNECTED',
         message: 'Please connect your personal Gmail account first.',
       });
     }
 
-    const recipientEmail = String(req.body?.recipientEmail || conn.gmailAddress).trim();
-    const subject = String(req.body?.subject || `ZENVIK-AGENT Test Email from ${conn.gmailAddress}`).trim();
+    const effectiveGmail = conn?.gmailAddress || user?.email || '';
+    const recipientEmail = String(req.body?.recipientEmail || effectiveGmail).trim();
+    const subject = String(req.body?.subject || `ZENVIK-AGENT Test Email from ${effectiveGmail}`).trim();
     const coverLetter = String(
       req.body?.coverLetter ||
-        `Hello ${user?.displayName || ''},\n\nThis is a verified test application email sent directly from your connected personal Gmail account (${conn.gmailAddress}) via ZENVIK-AGENT.\n\nBest regards,\n${user?.displayName || conn.gmailAddress}`
+        `Hello ${user?.displayName || ''},\n\nThis is a verified test application email sent directly from your connected personal Gmail account (${effectiveGmail}) via ZENVIK-AGENT.\n\nBest regards,\n${user?.displayName || effectiveGmail}`
     );
     const cvId = req.body?.cvId ? String(req.body.cvId) : undefined;
     const inlineCv = req.body?.inlineCv || {
@@ -2254,6 +2398,7 @@ export function createMultiUserSaaSRouter(options?: {
         coverLetter,
         cvId,
         inlineCv,
+        liveClientAccessToken,
       });
       return res.json({
         success: true,
@@ -2291,6 +2436,8 @@ export function createMultiUserSaaSRouter(options?: {
     }
 
     const user = state.users[userId];
+    const liveClientAccessToken =
+      typeof req.headers['x-gmail-access-token'] === 'string' ? req.headers['x-gmail-access-token'].trim() : null;
     try {
       const record = await executeIsolatedEmailSend({
         userId,
@@ -2302,6 +2449,7 @@ export function createMultiUserSaaSRouter(options?: {
         cvId: target.cvId,
         isRetry: true,
         existingHistoryId: target.id,
+        liveClientAccessToken,
       });
       return res.json({
         success: true,
@@ -2492,6 +2640,12 @@ export function createMultiUserSaaSRouter(options?: {
           configured: providerStatus.openai.configured,
           model: state.adminSettings.openaiModel,
           status: providerStatus.openai.status,
+        },
+        grok: {
+          enabled: state.adminSettings.grokEnabled !== false,
+          configured: providerStatus.grok.configured,
+          model: state.adminSettings.grokModel || providerStatus.grok.model,
+          status: providerStatus.grok.status,
         },
       },
       security: {
@@ -2980,6 +3134,17 @@ export function createMultiUserSaaSRouter(options?: {
         avgLatencyMs: summary.openai.avgLatencyMs,
         lastError: summary.openai.lastError,
       },
+      grok: {
+        enabled: state.adminSettings.grokEnabled !== false,
+        configured: summary.grok.configured,
+        available: state.adminSettings.grokEnabled !== false && summary.grok.configured,
+        model: state.adminSettings.grokModel || summary.grok.model,
+        availableModels: summary.grok.availableModels,
+        status: state.adminSettings.grokEnabled !== false ? summary.grok.status : 'disabled_by_admin',
+        totalRequests: summary.grok.totalRequests,
+        avgLatencyMs: summary.grok.avgLatencyMs,
+        lastError: summary.grok.lastError,
+      },
       cooperativeMode: summary.cooperativeMode,
     });
   });
@@ -3352,13 +3517,17 @@ export function createMultiUserSaaSRouter(options?: {
         ...state.adminSettings,
         defaultGeminiModel: state.adminSettings.geminiModel,
         defaultOpenAIModel: state.adminSettings.openaiModel,
+        defaultGrokModel: state.adminSettings.grokModel || providerSummary.grok.model,
         totalGeminiRequests: providerSummary.gemini.totalRequests,
         totalGeminiErrors: providerSummary.gemini.lastError ? 1 : 0,
         totalOpenAIRequests: providerSummary.openai.totalRequests,
         totalOpenAIErrors: providerSummary.openai.lastError ? 1 : 0,
+        totalGrokRequests: providerSummary.grok.totalRequests,
+        totalGrokErrors: providerSummary.grok.lastError ? 1 : 0,
         serverEnvStatus: {
           geminiKeyPresent: providerSummary.gemini.configured,
           openaiKeyPresent: providerSummary.openai.configured,
+          grokKeyPresent: providerSummary.grok.configured,
         },
       },
       providers: {
@@ -3374,6 +3543,12 @@ export function createMultiUserSaaSRouter(options?: {
           activeModel: state.adminSettings.openaiModel,
           secretSource: providerSummary.openai.configured ? 'Server Environment / Google Secret Manager (OPENAI_API_KEY)' : 'Not Configured',
         },
+        grok: {
+          ...providerSummary.grok,
+          enabled: state.adminSettings.grokEnabled !== false,
+          activeModel: state.adminSettings.grokModel || providerSummary.grok.model,
+          secretSource: providerSummary.grok.configured ? 'Server Environment / Google Secret Manager (GROK_API_KEY)' : 'Not Configured',
+        },
       },
       totalAiRequests: state.systemStats.totalAiRequests || 0,
     });
@@ -3385,11 +3560,14 @@ export function createMultiUserSaaSRouter(options?: {
 
     if (typeof req.body?.geminiEnabled === 'boolean') cfg.geminiEnabled = req.body.geminiEnabled;
     if (typeof req.body?.openaiEnabled === 'boolean') cfg.openaiEnabled = req.body.openaiEnabled;
+    if (typeof req.body?.grokEnabled === 'boolean') cfg.grokEnabled = req.body.grokEnabled;
     const rawDefaultProvider = String(req.body?.defaultProvider || '').toLowerCase();
     if (rawDefaultProvider === 'gemini') {
       cfg.defaultProvider = 'Gemini';
     } else if (rawDefaultProvider === 'openai') {
       cfg.defaultProvider = 'OpenAI';
+    } else if (rawDefaultProvider === 'grok') {
+      cfg.defaultProvider = 'Grok';
     }
     const rawGeminiModel = req.body?.geminiModel || req.body?.defaultGeminiModel;
     if (typeof rawGeminiModel === 'string' && rawGeminiModel.trim()) {
@@ -3400,6 +3578,11 @@ export function createMultiUserSaaSRouter(options?: {
     if (typeof rawOpenAIModel === 'string' && rawOpenAIModel.trim()) {
       cfg.openaiModel = rawOpenAIModel.trim();
       aiCooperativeEngine.setProviderModel('OpenAI', cfg.openaiModel);
+    }
+    const rawGrokModel = req.body?.grokModel || req.body?.defaultGrokModel;
+    if (typeof rawGrokModel === 'string' && rawGrokModel.trim()) {
+      cfg.grokModel = rawGrokModel.trim();
+      aiCooperativeEngine.setProviderModel('Grok', cfg.grokModel);
     }
     if (typeof req.body?.fallbackEnabled === 'boolean') cfg.fallbackEnabled = req.body.fallbackEnabled;
     if (typeof req.body?.rateLimitPerMinute === 'number') {
@@ -3413,7 +3596,7 @@ export function createMultiUserSaaSRouter(options?: {
     storage.appendLog(
       'info',
       'admin_ai_config_updated',
-      `Admin updated AI configuration (Default=${cfg.defaultProvider}, Gemini=${cfg.geminiEnabled}/${cfg.geminiModel}, OpenAI=${cfg.openaiEnabled}/${cfg.openaiModel})`,
+      `Admin updated AI configuration (Default=${cfg.defaultProvider}, Gemini=${cfg.geminiEnabled}/${cfg.geminiModel}, OpenAI=${cfg.openaiEnabled}/${cfg.openaiModel}, Grok=${cfg.grokEnabled !== false}/${cfg.grokModel || 'grok-2-latest'})`,
       req.authenticatedUser?.userId
     );
     storage.save();
@@ -3424,6 +3607,7 @@ export function createMultiUserSaaSRouter(options?: {
         ...cfg,
         defaultGeminiModel: cfg.geminiModel,
         defaultOpenAIModel: cfg.openaiModel,
+        defaultGrokModel: cfg.grokModel || 'grok-2-latest',
       },
     });
   });
@@ -3436,7 +3620,7 @@ export function createMultiUserSaaSRouter(options?: {
       const gRes = await aiCooperativeEngine.testGeminiConnection();
       results.gemini = {
         ...gRes,
-        status: (gRes as any)?.status || ((gRes as any)?.ok ? 'connected' : 'fallback_ready'),
+        status: (gRes as any)?.status || ((gRes as any)?.connected ? 'connected' : 'fallback_ready'),
         latencyMs: (gRes as any)?.latencyMs ?? 12,
       };
     }
@@ -3444,8 +3628,16 @@ export function createMultiUserSaaSRouter(options?: {
       const oRes = await aiCooperativeEngine.testOpenAIConnection();
       results.openai = {
         ...oRes,
-        status: (oRes as any)?.status || ((oRes as any)?.ok ? 'connected' : 'fallback_ready'),
+        status: (oRes as any)?.status || ((oRes as any)?.connected ? 'connected' : 'fallback_ready'),
         latencyMs: (oRes as any)?.latencyMs ?? 12,
+      };
+    }
+    if (provider === 'grok' || provider === 'all') {
+      const kRes = await aiCooperativeEngine.testGrokConnection();
+      results.grok = {
+        ...kRes,
+        status: (kRes as any)?.status || ((kRes as any)?.connected ? 'connected' : 'fallback_ready'),
+        latencyMs: (kRes as any)?.latencyMs ?? 12,
       };
     }
     const providerSummary = aiCooperativeEngine.getProviderStatusSummary();
@@ -3457,13 +3649,17 @@ export function createMultiUserSaaSRouter(options?: {
         ...state.adminSettings,
         defaultGeminiModel: state.adminSettings.geminiModel,
         defaultOpenAIModel: state.adminSettings.openaiModel,
+        defaultGrokModel: state.adminSettings.grokModel || providerSummary.grok.model,
         totalGeminiRequests: providerSummary.gemini.totalRequests,
         totalGeminiErrors: providerSummary.gemini.lastError ? 1 : 0,
         totalOpenAIRequests: providerSummary.openai.totalRequests,
         totalOpenAIErrors: providerSummary.openai.lastError ? 1 : 0,
+        totalGrokRequests: providerSummary.grok.totalRequests,
+        totalGrokErrors: providerSummary.grok.lastError ? 1 : 0,
         serverEnvStatus: {
           geminiKeyPresent: providerSummary.gemini.configured,
           openaiKeyPresent: providerSummary.openai.configured,
+          grokKeyPresent: providerSummary.grok.configured,
         },
       },
     });

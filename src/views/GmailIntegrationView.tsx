@@ -139,6 +139,13 @@ export const GmailIntegrationView: React.FC<GmailIntegrationViewProps> = ({ onBa
 
   useEffect(() => {
     loadData();
+    const onGmailUpdated = () => {
+      loadData();
+    };
+    window.addEventListener('gmail_connection_updated', onGmailUpdated);
+    return () => {
+      window.removeEventListener('gmail_connection_updated', onGmailUpdated);
+    };
   }, []);
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
@@ -293,18 +300,12 @@ export const GmailIntegrationView: React.FC<GmailIntegrationViewProps> = ({ onBa
       setNotice({ type: 'error', message: 'Please enter at least one recipient email address.' });
       return;
     }
-    const selectedCv = workspace.cvs.find(c => c.id === selectedCvId) || workspace.cvs[0];
-    if (!selectedCv) {
-      setNotice({
-        type: 'error',
-        message: 'Please upload or select a PDF CV in your Personal CV Gallery before sending.',
-      });
-      return;
-    }
+    const selectedCv = workspace.cvs.find(c => c.id === selectedCvId) || workspace.cvs[0] || null;
+    const cvLabel = selectedCv ? selectedCv.fileName : 'Default Active CV from Central CV Library';
 
     setConfirmDialog({
       title: `Confirm Sending ${parsedRecipientList.length} Individual Application Email(s)`,
-      description: `Each of the ${parsedRecipientList.length} recipient(s) will receive a separate, individual email sent directly from your Gmail (${workspace.gmailConnection.gmailAddress}) with your CV "${selectedCv.fileName}" attached.`,
+      description: `Each of the ${parsedRecipientList.length} recipient(s) will receive a separate, individual email sent directly from your Gmail (${workspace.gmailConnection.gmailAddress}) with your CV "${cvLabel}" attached.`,
       confirmLabel: `Send ${parsedRecipientList.length} Email(s) Now`,
       onConfirm: async () => {
         setConfirmDialog(null);
@@ -320,7 +321,7 @@ export const GmailIntegrationView: React.FC<GmailIntegrationViewProps> = ({ onBa
             })),
             subject: subjectInput,
             coverLetter: coverLetterInput,
-            cvId: selectedCv.id,
+            cvId: selectedCv?.id,
           });
           setSendProgress({
             total: parsedRecipientList.length,

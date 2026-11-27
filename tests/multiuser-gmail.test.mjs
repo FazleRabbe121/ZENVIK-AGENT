@@ -101,7 +101,20 @@ async function createTestServer() {
 
   const app = express();
   app.use(express.json({ limit: '5mb' }));
-  const saas = createMultiUserSaaSRouter({ dbFilePath, transport });
+  const saas = createMultiUserSaaSRouter({
+    dbFilePath,
+    transport,
+    verifyFirebaseToken: async (idToken) => {
+      if (idToken === 'valid_signed_firebase_admin_token_for_test') {
+        return {
+          uid: 'usr_owner_fazle_rabbi',
+          email: PRIMARY_ADMIN_EMAIL,
+          name: 'Fazle Rabbi',
+        };
+      }
+      return null;
+    },
+  });
   app.use('/api', saas.router);
 
   const server = http.createServer(app);
@@ -433,14 +446,35 @@ test('12-Point Multi-User Verification Plan (Test User A, Test User B, Test User
     const nonAdminAttempt = await ctx.api('GET', '/api/multiuser/admin/overview', { token: tokenA });
     assert.equal(nonAdminAttempt.status, 403);
 
-    // Admin user logs in and views overview
-    const adminSync = await ctx.api('POST', '/api/multiuser/auth/firebase-sync', {
+    // Unauthenticated or forged firebase-sync MUST be rejected with 401
+    const unauthAdminSync = await ctx.api('POST', '/api/multiuser/auth/firebase-sync', {
       body: {
         uid: 'usr_owner_fazle_rabbi',
         email: PRIMARY_ADMIN_EMAIL,
-        displayName: 'Fazle Rabbi',
+        displayName: 'Forged Attacker',
       },
     });
+    assert.equal(unauthAdminSync.status, 401);
+    assert.equal(unauthAdminSync.data.error, 'INVALID_FIREBASE_TOKEN');
+
+    const forgedJwt = `${Buffer.from('{"alg":"none"}').toString('base64url')}.${Buffer.from(
+      JSON.stringify({ sub: 'usr_owner_fazle_rabbi', email: PRIMARY_ADMIN_EMAIL, exp: 9999999999 })
+    ).toString('base64url')}.forgedsig`;
+    const forgedSync = await ctx.api('POST', '/api/multiuser/auth/firebase-sync', {
+      token: forgedJwt,
+      body: { idToken: forgedJwt },
+    });
+    assert.equal(forgedSync.status, 401);
+    assert.equal(forgedSync.data.error, 'INVALID_FIREBASE_TOKEN');
+
+    // Admin user logs in with a verified Firebase ID token and views overview
+    const adminSync = await ctx.api('POST', '/api/multiuser/auth/firebase-sync', {
+      token: 'valid_signed_firebase_admin_token_for_test',
+      body: {
+        idToken: 'valid_signed_firebase_admin_token_for_test',
+      },
+    });
+    assert.equal(adminSync.status, 200);
     const adminToken = adminSync.data.sessionToken;
     const adminOverview = await ctx.api('GET', '/api/multiuser/admin/overview', { token: adminToken });
     assert.equal(adminOverview.status, 200);
@@ -638,6 +672,9 @@ test('12-Point Multi-User Verification Plan (Test User A, Test User B, Test User
     });
     assert.equal(adminAITest.status, 200);
     assert.ok(adminAITest.data.results.gemini.status);
+    assert.ok(adminAITest.data.results.openai.status);
+    assert.ok(adminAITest.data.results.grok.status);
+    assert.ok(healthRes.data.aiProviders.grok);
   } finally {
     await ctx.close();
     fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
