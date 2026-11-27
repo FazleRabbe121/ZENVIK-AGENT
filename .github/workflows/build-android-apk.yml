@@ -15,6 +15,9 @@ on:
 permissions:
   contents: write
 
+env:
+  GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
 concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: true
@@ -29,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud (Optional Auto-Detect of Live Cloud Run Backend)
-        if: inputs.backend_url == '' && vars.ZENVIK_BACKEND_URL == '' && secrets.ZENVIK_BACKEND_URL == '' && secrets.GCP_SA_KEY != ''
+        if: inputs.backend_url == '' && vars.ZENVIK_BACKEND_URL == '' && secrets.ZENVIK_BACKEND_URL == '' && env.GCP_SA_KEY != ''
         continue-on-error: true
         uses: google-github-actions/auth@v2
         with:
