@@ -11,6 +11,7 @@ env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || 'ace-mission-353410' }}
   REGION: europe-west2
   SERVICE_NAME: zenvik-agent-backend
+  GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
 jobs:
   test-and-verify:
@@ -40,7 +41,7 @@ jobs:
   deploy-cloud-run:
     name: Build Container & Deploy to Google Cloud Run
     needs: test-and-verify
-    if: github.event_name == 'workflow_dispatch' || ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && secrets.GCP_SA_KEY != '')
+    if: github.event_name == 'workflow_dispatch' || ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && env.GCP_SA_KEY != '')
     runs-on: ubuntu-latest
     permissions:
       contents: read
