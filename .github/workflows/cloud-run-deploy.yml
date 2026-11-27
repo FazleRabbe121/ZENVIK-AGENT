@@ -41,7 +41,7 @@ jobs:
   deploy-cloud-run:
     name: Build Container & Deploy to Google Cloud Run
     needs: test-and-verify
-    if: github.event_name == 'workflow_dispatch' || ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && env.GCP_SA_KEY != '')
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,25 +52,31 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (skip when credentials are not configured)
+        id: auth
+        if: env.GCP_SA_KEY != ''
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
+        if: steps.auth.outcome == 'success'
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Configure Active GCP Project & Required APIs
+        if: steps.auth.outcome == 'success'
         run: |
           gcloud config set project "$PROJECT_ID"
           gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com --quiet || true
 
       - name: Build & Push Container Image via Cloud Build
+        if: steps.auth.outcome == 'success'
         run: |
           gcloud builds submit --tag "gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA"
 
       - name: Deploy Full-Stack Backend to Google Cloud Run (europe-west2)
         id: deploy
+        if: steps.auth.outcome == 'success'
         env:
           SECRET_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SECRET_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -134,7 +140,7 @@ jobs:
           echo "Deployed Live Cloud Run Backend URL: $SERVICE_URL"
 
       - name: Trigger Android APK Rebuild Pointing to Live Cloud Run URL
-        if: steps.deploy.outputs.service_url != ''
+        if: steps.deploy.outcome == 'success' && steps.deploy.outputs.service_url != ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
