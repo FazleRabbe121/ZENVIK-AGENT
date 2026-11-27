@@ -92,7 +92,7 @@ test('Phase 7: Job search deduplication & Gmail queue safety invariants', () => 
   assert.match(jobService, /isDuplicateJob/, 'jobSearchService must deduplicate jobs across sources');
 });
 
-test('Phase 9: Android WebViewAssetLoader, Gradle configuration, and google-services.json', () => {
+test('Phase 9: Android WebViewAssetLoader and Gradle configuration (web Firebase SDK)', () => {
   const mainActivity = readFile('android/app/src/main/java/com/ccd/abetteryou/MainActivity.kt');
   assert.match(mainActivity, /WebViewAssetLoader/, 'MainActivity.kt must use WebViewAssetLoader');
   assert.match(
@@ -116,15 +116,16 @@ test('Phase 9: Android WebViewAssetLoader, Gradle configuration, and google-serv
   assert.match(buildGradle, /versionCode\s*=\s*1/, 'versionCode must be 1');
   assert.match(buildGradle, /versionName\s*=\s*"1\.0\.0"/, 'versionName must be 1.0.0');
 
-  const googleServices = JSON.parse(readFile('android/app/google-services.json'));
-  const packageNames = googleServices.client.map(
-    (c) => c.client_info?.android_client_info?.package_name
+  // This Android wrapper hosts the web app in a WebView and uses the Firebase
+  // JavaScript SDK (firebase-applet-config.json). It does not apply the native
+  // Google Services Gradle plugin, so google-services.json is not required.
+  const appGradle = readFile('android/app/build.gradle.kts');
+  assert.doesNotMatch(
+    appGradle,
+    /com\.google\.gms\.google-services/,
+    'WebView wrapper must not require the native Google Services Gradle plugin'
   );
-  assert.ok(packageNames.includes('com.ccd.abetteryou'), 'google-services.json must include com.ccd.abetteryou');
-  assert.ok(
-    packageNames.includes('com.ccd.abetteryou.debug'),
-    'google-services.json must include com.ccd.abetteryou.debug for debug APK builds'
-  );
+  assert.ok(exists('firebase-applet-config.json'), 'Web Firebase configuration must be present');
 });
 
 test('Phase 10 & 12: GitHub workflows and required documentation files exist', () => {
