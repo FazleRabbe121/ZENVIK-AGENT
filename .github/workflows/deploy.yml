@@ -29,7 +29,7 @@ jobs:
           cache: 'npm'
 
       - name: Install Dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: TypeScript Validation
         run: npm run lint
@@ -41,6 +41,7 @@ jobs:
         env:
           STATIC_SPA: "true"
           VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH || '/' }}
+          VITE_BACKEND_URL: ${{ vars.ZENVIK_BACKEND_URL || 'https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app' }}
           VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}

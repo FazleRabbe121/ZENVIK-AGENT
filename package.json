@@ -14,7 +14,7 @@
     "android:open": "cap open android",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test tests/personal-ai/*.test.mjs tests/zenvik-audit.test.mjs tests/multiuser-gmail.test.mjs tests/backend-audit.test.mjs"
+    "test": "tsx --test tests/personal-ai/*.test.mjs tests/zenvik-audit.test.mjs tests/multiuser-gmail.test.mjs tests/backend-audit.test.mjs tests/zenvik-complete-multiuser.test.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.3",

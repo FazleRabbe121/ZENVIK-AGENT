@@ -14,4 +14,5 @@ local.properties
 *.apk
 *.aab
 data/.zenvik_runtime_secret
+data/*.zip
 

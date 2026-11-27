@@ -22,13 +22,12 @@ import {
   ConnectedServicesDashboardResponse,
   AdminAIConfigState,
   MultiUserJobPreferences,
+  UserGeminiBYOKSettings,
   fetchConnectedServicesStatus,
   fetchMultiUserWorkspace,
   connectPersonalGmailViaPopupOrBackend,
   disconnectPersonalGmail,
   syncLocalCVGalleryToBackend,
-  downloadMultiUserCV,
-  selectDefaultMultiUserCV,
   fetchAdminAIConfig,
   updateAdminAIConfig,
   testAdminAIProviders,
@@ -36,7 +35,10 @@ import {
   fetchCloudRunHealth,
   searchMultiUserJobs,
   fetchMultiUserJobPreferences,
-  updateMultiUserJobPreferences,
+  fetchUserGeminiSettings,
+  saveUserGeminiSettings,
+  deleteUserGeminiKey,
+  testUserGeminiKey,
 } from '../services/multiUserService';
 import { signInWithGoogle } from '../services/firebase';
 import { FirstTimeSetupWizardModal } from '../components/FirstTimeSetupWizard';
@@ -56,10 +58,17 @@ export const ConnectedServicesView: React.FC = () => {
   const [showSetupWizard, setShowSetupWizard] = useState<boolean>(false);
   const [showAuditLogs, setShowAuditLogs] = useState<boolean>(false);
 
+  // Per-User Gemini BYOK AI Settings & Optional Gmail Reply Tracking Scope
+  const [byokSettings, setByokSettings] = useState<UserGeminiBYOKSettings | null>(null);
+  const [byokKeyInput, setByokKeyInput] = useState<string>('');
+  const [byokModelInput, setByokModelInput] = useState<string>('gemini-4-hydrogen');
+  const [byokFeedback, setByokFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [includeReadRepliesScope, setIncludeReadRepliesScope] = useState<boolean>(false);
+
   const loadDashboard = async (professionFilter = selectedProfessionFilter) => {
     setLoading(true);
     try {
-      const [svc, ws, hlth, prefs, jobsRes] = await Promise.all([
+      const [svc, ws, hlth, prefs, jobsRes, userGemini] = await Promise.all([
         fetchConnectedServicesStatus().catch(() => null),
         fetchMultiUserWorkspace().catch(() => null),
         fetchCloudRunHealth().catch(() => null),
@@ -68,12 +77,17 @@ export const ConnectedServicesView: React.FC = () => {
           profession: professionFilter === 'All' ? undefined : professionFilter,
           limit: 6,
         }).catch(() => null),
+        fetchUserGeminiSettings().catch(() => null),
       ]);
       if (svc) setServicesData(svc);
       if (ws) setWorkspace(ws);
       if (hlth) setHealthInfo(hlth);
       if (prefs) setJobPrefs(prefs);
       if (jobsRes?.jobs) setSampleJobs(jobsRes.jobs);
+      if (userGemini) {
+        setByokSettings(userGemini);
+        setByokModelInput(userGemini.selectedModel || 'gemini-4-hydrogen');
+      }
 
       if (ws?.user?.role === 'admin') {
         const [aiCfg, logs] = await Promise.all([
@@ -117,14 +131,77 @@ export const ConnectedServicesView: React.FC = () => {
     setBusyAction('gmail-connect');
     setNotice(null);
     try {
-      const res = await connectPersonalGmailViaPopupOrBackend();
+      const res = await connectPersonalGmailViaPopupOrBackend({
+        includeReadReplies: includeReadRepliesScope,
+      });
       await loadDashboard();
       setNotice({
         type: 'success',
-        message: `Personal Gmail (${res.gmailAddress}) authorized with scope https://www.googleapis.com/auth/gmail.send.`,
+        message: `Personal Gmail (${res.gmailAddress}) authorized and verified (${(res.scopes || ['gmail.send']).join(', ')}).`,
       });
     } catch (err: any) {
       setNotice({ type: 'error', message: err?.message || 'Gmail connection failed.' });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleSaveUserGeminiBYOK = async () => {
+    setBusyAction('byok-save');
+    setByokFeedback(null);
+    try {
+      const res = await saveUserGeminiSettings({
+        apiKey: byokKeyInput.trim() || undefined,
+        selectedModel: byokModelInput,
+        verifyNow: Boolean(byokKeyInput.trim()),
+      });
+      setByokSettings(res.settings);
+      setByokKeyInput('');
+      setByokFeedback({
+        type: 'success',
+        text: res.verified
+          ? `Personal Gemini API key encrypted (AES-256-GCM) & verified (${res.latencyMs ?? 0}ms).`
+          : 'Gemini model preference updated.',
+      });
+      await loadDashboard();
+    } catch (err: any) {
+      setByokFeedback({ type: 'error', text: err?.message || 'Failed to save Gemini API key.' });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleTestUserGeminiBYOK = async () => {
+    setBusyAction('byok-test');
+    setByokFeedback(null);
+    try {
+      const res = await testUserGeminiKey({
+        apiKey: byokKeyInput.trim() || undefined,
+        selectedModel: byokModelInput,
+      });
+      setByokFeedback({
+        type: 'success',
+        text: `Live Test Passed — Model: ${res.model || byokModelInput} (${res.latencyMs ?? 0}ms, source: ${res.source}).`,
+      });
+      await loadDashboard();
+    } catch (err: any) {
+      setByokFeedback({ type: 'error', text: err?.message || 'Gemini API key test failed.' });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleDeleteUserGeminiBYOK = async () => {
+    setBusyAction('byok-delete');
+    setByokFeedback(null);
+    try {
+      const res = await deleteUserGeminiKey();
+      setByokSettings(res.settings);
+      setByokKeyInput('');
+      setByokFeedback({ type: 'success', text: 'Personal Gemini API key removed from encrypted storage.' });
+      await loadDashboard();
+    } catch (err: any) {
+      setByokFeedback({ type: 'error', text: err?.message || 'Failed to remove Gemini API key.' });
     } finally {
       setBusyAction(null);
     }
@@ -246,7 +323,7 @@ export const ConnectedServicesView: React.FC = () => {
               className="px-4 py-2.5 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs flex items-center gap-2 shadow-sm transition cursor-pointer"
             >
               <Wand2 className="w-3.5 h-3.5" />
-              <span>Launch 5-Step Setup Wizard</span>
+              <span>Launch 8-Step Setup Wizard</span>
             </button>
 
             <button
@@ -347,8 +424,17 @@ export const ConnectedServicesView: React.FC = () => {
                 {svc?.gmail.gmailAddress || 'Optional — Connect when ready to send'}
               </div>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                Scope: <code className="font-mono">gmail.send</code> only. Sends job applications strictly from your own Gmail address.
+                Minimum scope: <code className="font-mono">gmail.send</code> (plus optional <code className="font-mono">gmail.readonly</code> for reply sync). Encrypted with AES-256-GCM on backend.
               </p>
+              <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={includeReadRepliesScope}
+                  onChange={e => setIncludeReadRepliesScope(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-emerald-600"
+                />
+                <span>Include optional Reply Tracking (gmail.readonly)</span>
+              </label>
               {svc?.gmail.lastError && (
                 <div className="text-[10px] text-rose-500 font-semibold">Alert: {svc.gmail.lastError}</div>
               )}
@@ -516,6 +602,132 @@ export const ConnectedServicesView: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Personal AI Settings — Gemini API (BYOK) Management Panel */}
+      <div className="p-6 rounded-3xl bg-white dark:bg-[#12151e] border border-violet-200/90 dark:border-violet-500/30 shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-[#1f2434]">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-violet-500/15 text-violet-700 dark:text-violet-300 border border-violet-500/30">
+                AI Settings • Bring Your Own Key (BYOK)
+              </span>
+              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
+                {byokSettings?.hasPersonalKey
+                  ? `Personal Key Active (${byokSettings.keyMasked})`
+                  : byokSettings?.serverFallbackAvailable
+                  ? 'Using Server Fallback'
+                  : 'No Personal Key Configured'}
+              </span>
+            </div>
+            <h3 className="text-base font-extrabold text-slate-900 dark:text-white mt-1 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-violet-600 dark:text-violet-400" />
+              <span>Personal Gemini API Key &amp; Model Settings</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Connect your own Google Gemini API key for dedicated private quota. Keys are encrypted at rest with AES-256-GCM on our backend, isolated strictly to your user ID, and never displayed in plaintext after saving.
+            </p>
+          </div>
+          {byokSettings && (
+            <div className="text-right text-[11px] font-mono text-slate-500 dark:text-slate-400 shrink-0">
+              <div>Requests: {byokSettings.usageRequests} • Errors: {byokSettings.usageErrors}</div>
+              <div>
+                Status:{' '}
+                <strong className={byokSettings.status === 'connected' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>
+                  {byokSettings.status.toUpperCase()}
+                </strong>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {byokFeedback && (
+          <div
+            className={`p-3 rounded-2xl text-xs font-semibold border ${
+              byokFeedback.type === 'success'
+                ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-500/30 text-emerald-800 dark:text-emerald-300'
+                : 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-500/30 text-rose-700 dark:text-rose-300'
+            }`}
+          >
+            {byokFeedback.text}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+          <div className="md:col-span-2">
+            <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">
+              {byokSettings?.hasPersonalKey
+                ? `Replace Personal Gemini API Key (Stored: ${byokSettings.keyMasked})`
+                : 'Add Personal Gemini API Key'}
+            </label>
+            <input
+              type="password"
+              value={byokKeyInput}
+              onChange={e => setByokKeyInput(e.target.value)}
+              placeholder="Paste your Gemini API key (AIza...)"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0b0d13] border border-slate-200 dark:border-[#232838] text-xs font-mono text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">
+              Active Gemini Model
+            </label>
+            <select
+              value={byokModelInput}
+              onChange={e => setByokModelInput(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0b0d13] border border-slate-200 dark:border-[#232838] text-xs font-mono text-slate-900 dark:text-white"
+            >
+              <option value="gemini-4-hydrogen">gemini-4-hydrogen</option>
+              <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+              <option value="gemini-4-neon">gemini-4-neon</option>
+              <option value="gemini-4-carbon">gemini-4-carbon</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5 pt-1">
+          <button
+            type="button"
+            onClick={handleSaveUserGeminiBYOK}
+            disabled={busyAction !== null}
+            className="px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white font-bold text-xs cursor-pointer"
+          >
+            {busyAction === 'byok-save'
+              ? 'Encrypting & Verifying...'
+              : byokKeyInput.trim()
+              ? 'Save & Verify API Key'
+              : 'Save Model Preference'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleTestUserGeminiBYOK}
+            disabled={busyAction !== null}
+            className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/15 text-slate-800 dark:text-slate-100 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+          >
+            <Activity className={`w-3.5 h-3.5 ${busyAction === 'byok-test' ? 'animate-spin' : ''}`} />
+            <span>{busyAction === 'byok-test' ? 'Testing Key...' : 'Test API Key'}</span>
+          </button>
+
+          {byokSettings?.hasPersonalKey && (
+            <button
+              type="button"
+              onClick={handleDeleteUserGeminiBYOK}
+              disabled={busyAction !== null}
+              className="px-4 py-2.5 rounded-xl border border-rose-300 dark:border-rose-500/40 text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-500/10 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Remove Key</span>
+            </button>
+          )}
+        </div>
+
+        {byokSettings?.lastError && (
+          <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-[11px]">
+            Last AI Provider Notice: {byokSettings.lastError}
+          </div>
+        )}
       </div>
 
       {/* Phase 7 Quick Multi-Profession Job Search & CV Gallery Verification Bar */}

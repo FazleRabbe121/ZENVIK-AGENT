@@ -14,10 +14,21 @@ android {
         versionCode = 1
         versionName = "1.0.0"
 
+        val configuredBackendUrl = (
+            (project.findProperty("ZENVIK_BACKEND_URL") as String?)
+                ?: System.getenv("ZENVIK_BACKEND_URL")
+                ?: "https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app"
+        ).trim().trimEnd('/')
+        buildConfigField("String", "APP_BACKEND_URL", "\"$configuredBackendUrl\"")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {
@@ -53,4 +64,5 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.browser:browser:1.8.0")
 }

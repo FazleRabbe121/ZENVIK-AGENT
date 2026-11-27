@@ -36,6 +36,11 @@ import {
 import { generateCoverLetterPdfBase64, isValidPdfBase64 } from '../services/pdfExporter';
 import { CVDocumentItem } from '../types/cv';
 import { resolveVerifiedEmployerEmail } from '../utils/verifiedEmployerEmails';
+import {
+  isGuestSessionActive,
+  fetchGmailStatus,
+  connectPersonalGmailViaPopupOrBackend,
+} from '../services/multiUserService';
 
 interface GmailDispatchModalProps {
   application: PreparedJobApplication;
@@ -116,13 +121,16 @@ export const GmailDispatchModal: React.FC<GmailDispatchModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(preservedDraft?.lastError || null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
+  const isGuestMode = isGuestSessionActive();
+  const [guestOwnerAccountConfirmed, setGuestOwnerAccountConfirmed] = useState(false);
+
   const [gmailStatus, setGmailStatus] = useState<{
     connected: boolean;
     email: string | null;
   }>({ connected: false, email: null });
 
   // Test Actual Delivery state
-  const [testEmailAddress, setTestEmailAddress] = useState<string>('fazle.rabbe.doc@gmail.com');
+  const [testEmailAddress, setTestEmailAddress] = useState<string>('');
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [testDeliveryResult, setTestDeliveryResult] = useState<{
     success: boolean;
@@ -133,11 +141,21 @@ export const GmailDispatchModal: React.FC<GmailDispatchModalProps> = ({
 
   useEffect(() => {
     const status = GmailService.getConnectionStatus();
-    setGmailStatus({ connected: status.connected, email: status.email });
-    if (status.email) {
+    if (status.connected && status.email) {
+      setGmailStatus({ connected: true, email: status.email });
       setTestEmailAddress(status.email);
     }
-  }, []);
+    if (!isGuestMode) {
+      fetchGmailStatus()
+        .then(serverStatus => {
+          if (serverStatus.connected && serverStatus.gmailAddress) {
+            setGmailStatus({ connected: true, email: serverStatus.gmailAddress });
+            setTestEmailAddress(prev => prev || serverStatus.gmailAddress || '');
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isGuestMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -183,15 +201,22 @@ export const GmailDispatchModal: React.FC<GmailDispatchModalProps> = ({
   }, [application.company]);
 
   const handleConnectGmail = async () => {
+    if (isGuestMode) {
+      setErrorMsg('Guest sessions cannot link a private Gmail account. Please Sign Up for an independent account to connect your own Gmail.');
+      return;
+    }
     setIsConnecting(true);
     setErrorMsg(null);
-    const res = await GmailService.connectGmailAccount();
-    setIsConnecting(false);
-    if (res.connected) {
-      setGmailStatus({ connected: true, email: res.email });
-      if (res.email) setTestEmailAddress(res.email);
-    } else if (res.error) {
-      setErrorMsg(res.error);
+    try {
+      const res = await connectPersonalGmailViaPopupOrBackend();
+      if (res.connected && res.gmailAddress) {
+        setGmailStatus({ connected: true, email: res.gmailAddress });
+        setTestEmailAddress(res.gmailAddress);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not authorize personal Gmail.');
+    } finally {
+      setIsConnecting(false);
     }
   };
 
@@ -356,6 +381,12 @@ export const GmailDispatchModal: React.FC<GmailDispatchModalProps> = ({
           })
         : undefined;
 
+      if (isGuestMode && !guestOwnerAccountConfirmed) {
+        setErrorMsg('Please confirm the Guest Mode disclosure checkbox before sending via the platform owner relay.');
+        setIsSending(false);
+        return;
+      }
+
       const res = await GmailService.sendJobApplication({
         to: recipientEmail.trim(),
         subject: subject.trim(),
@@ -372,6 +403,7 @@ export const GmailDispatchModal: React.FC<GmailDispatchModalProps> = ({
         jobId: application.id,
         cvTitle: resolvedCvAttachment.cvDocument?.title || resolvedCvAttachment.filename,
         allowResend: forceResend,
+        guestOwnerAccountConfirmed: isGuestMode ? guestOwnerAccountConfirmed : undefined,
       });
 
       if (res.success && res.messageId) {
@@ -490,46 +522,69 @@ export const GmailDispatchModal: React.FC<GmailDispatchModalProps> = ({
 
         {/* Body Content */}
         <div className="p-6 space-y-4 overflow-y-auto flex-1 bg-[#f8fafc] dark:bg-slate-900">
-          {/* Gmail Connection Status Bar */}
-          <div
-            className={`flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-2xl border ${
-              gmailStatus.connected
-                ? 'bg-emerald-50/90 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-500/30 text-emerald-800 dark:text-emerald-200'
-                : 'bg-amber-50/90 dark:bg-amber-950/30 border-amber-200 dark:border-amber-500/40 text-amber-800 dark:text-amber-200'
-            }`}
-          >
-            <div className="flex items-center gap-2.5 text-xs">
-              {gmailStatus.connected ? (
-                <>
-                  <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                  <span>
-                    Connected to Gmail API:{' '}
-                    <strong className="text-slate-900 dark:text-white">{gmailStatus.email || 'Authorized Account'}</strong>{' '}
-                    (Real PDF attachment & delivery verification active)
-                  </span>
-                </>
-              ) : (
-                <>
-                  <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                  <span>
-                    Connect your Google Gmail account to send with real PDF CV & Cover Letter attachments and verified delivery confirmation.
-                  </span>
-                </>
-              )}
+          {/* Guest Mode Owner-Account Relay Disclosure & Confirmation */}
+          {isGuestMode ? (
+            <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-500/40 text-amber-900 dark:text-amber-200 text-xs space-y-2.5">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">Guest Preview Email Disclosure</div>
+                  <p className="mt-0.5 leading-relaxed">
+                    You are in a temporary Guest Preview session. Any email sent during Guest Preview is dispatched via the platform owner&apos;s configured Gmail account on the backend (max 3 emails per guest session). Sign up for a free account to send from your own personal Gmail.
+                  </p>
+                </div>
+              </div>
+              <label className="flex items-center gap-2 font-semibold cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={guestOwnerAccountConfirmed}
+                  onChange={e => setGuestOwnerAccountConfirmed(e.target.checked)}
+                  className="w-4 h-4 accent-amber-600"
+                />
+                <span>I understand and confirm sending this preview email via the platform owner&apos;s Gmail account.</span>
+              </label>
             </div>
-            <button
-              onClick={handleConnectGmail}
-              disabled={isConnecting}
-              className="px-3.5 py-1.5 rounded-xl bg-[#2563eb] hover:bg-blue-700 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shrink-0 shadow-xs"
+          ) : (
+            <div
+              className={`flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-2xl border ${
+                gmailStatus.connected
+                  ? 'bg-emerald-50/90 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-500/30 text-emerald-800 dark:text-emerald-200'
+                  : 'bg-amber-50/90 dark:bg-amber-950/30 border-amber-200 dark:border-amber-500/40 text-amber-800 dark:text-amber-200'
+              }`}
             >
-              {isConnecting ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <LogIn className="w-3.5 h-3.5" />
-              )}
-              {gmailStatus.connected ? 'Reconnect / Switch Gmail' : 'Authorize Gmail API'}
-            </button>
-          </div>
+              <div className="flex items-center gap-2.5 text-xs">
+                {gmailStatus.connected ? (
+                  <>
+                    <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                    <span>
+                      Connected to Personal Gmail OAuth:{' '}
+                      <strong className="text-slate-900 dark:text-white">{gmailStatus.email || 'Authorized Account'}</strong>{' '}
+                      (Real PDF attachment &amp; delivery verification active)
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                    <span>
+                      Connect your personal Google Gmail account to send with real PDF CV &amp; Cover Letter attachments.
+                    </span>
+                  </>
+                )}
+              </div>
+              <button
+                onClick={handleConnectGmail}
+                disabled={isConnecting}
+                className="px-3.5 py-1.5 rounded-xl bg-[#2563eb] hover:bg-blue-700 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shrink-0 shadow-xs cursor-pointer"
+              >
+                {isConnecting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <LogIn className="w-3.5 h-3.5" />
+                )}
+                {gmailStatus.connected ? 'Reconnect / Switch Gmail' : 'Connect Personal Gmail'}
+              </button>
+            </div>
+          )}
 
           {/* Duplicate Prevention Warning Banner */}
           {duplicateCheck.alreadySent && duplicateCheck.record && (
@@ -974,7 +1029,7 @@ export const GmailDispatchModal: React.FC<GmailDispatchModalProps> = ({
 
             <button
               onClick={handleSendViaGmailApi}
-              disabled={isSending || sendSuccess}
+              disabled={isSending || sendSuccess || (isGuestMode && !guestOwnerAccountConfirmed)}
               className="px-6 py-2.5 rounded-xl bg-[#2563eb] hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-2 shadow-md shadow-blue-600/25 disabled:opacity-50 transition-all cursor-pointer"
             >
               {isSending ? (

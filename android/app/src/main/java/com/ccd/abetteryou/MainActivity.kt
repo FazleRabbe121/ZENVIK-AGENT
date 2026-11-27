@@ -2,13 +2,19 @@ package com.ccd.abetteryou
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
 import android.os.Message
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.DownloadListener
+import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -22,9 +28,14 @@ import android.widget.ProgressBar
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.webkit.WebViewAssetLoader
+import org.json.JSONObject
 import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLConnection
+import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
 
@@ -32,13 +43,16 @@ class MainActivity : ComponentActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var assetLoader: WebViewAssetLoader
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
+    private val probeExecutor = Executors.newSingleThreadExecutor()
 
     // Secure HTTPS virtual origin via AndroidX WebViewAssetLoader (never uses file:// URLs)
     private val localAssetOrigin = "https://appassets.androidplatform.net"
     private val localAssetIndexUrl = "$localAssetOrigin/index.html"
 
-    // Fallback live hosted app endpoint if local bundled assets are not present
-    private val hostedAppUrl = "https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app"
+    // Live full-stack Cloud Run backend + frontend endpoint (injected via Gradle BuildConfig)
+    private val hostedAppUrl: String = BuildConfig.APP_BACKEND_URL.ifBlank {
+        "https://ais-pre-3gibrfsvo4w6s27pi4qcyj-889586963829.europe-west2.run.app"
+    }.trimEnd('/')
 
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -65,11 +79,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // Configure WebViewAssetLoader to serve bundled assets/dist/* over https://appassets.androidplatform.net/*
+        // Never swallow /api/* or /healthz paths into index.html so backend requests always reach the server.
         assetLoader = WebViewAssetLoader.Builder()
             .setDomain("appassets.androidplatform.net")
             .addPathHandler("/") { path ->
                 val cleanPath = path.trimStart('/').ifEmpty { "index.html" }
-                openBundledDistAsset(cleanPath) ?: openBundledDistAsset("index.html")
+                if (cleanPath == "api" || cleanPath.startsWith("api/") || cleanPath == "healthz") {
+                    null
+                } else {
+                    openBundledDistAsset(cleanPath) ?: openBundledDistAsset("index.html")
+                }
             }
             .build()
 
@@ -117,6 +136,73 @@ class MainActivity : ComponentActivity() {
         })
 
         loadApplication()
+        handleOAuthDeepLink(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleOAuthDeepLink(intent)
+    }
+
+    private fun openExternalOAuthBrowser(uri: Uri) {
+        try {
+            val customTabsIntent = CustomTabsIntent.Builder()
+                .setShowTitle(true)
+                .build()
+            customTabsIntent.launchUrl(this, uri)
+        } catch (_: Exception) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, uri))
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun handleOAuthDeepLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        val scheme = data.scheme?.lowercase() ?: return
+        val host = data.host?.lowercase() ?: return
+        if ((scheme == "com.ccd.abetteryou" || scheme == "zenvik") && host == "oauth") {
+            val status = data.getQueryParameter("status") ?: "error"
+            val gmailAddress = data.getQueryParameter("gmailAddress") ?: ""
+            val error = data.getQueryParameter("error") ?: ""
+            val payload = JSONObject().apply {
+                put("status", status)
+                put("connected", status == "success")
+                put("gmailAddress", gmailAddress)
+                put("error", error)
+            }.toString()
+
+            runOnUiThread {
+                try {
+                    webView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('zenvik_android_oauth_callback', { detail: $payload }));",
+                        null
+                    )
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    inner class ZenvikAndroidBridge {
+        @JavascriptInterface
+        fun isAndroidApp(): Boolean = true
+
+        @JavascriptInterface
+        fun openOAuthUrl(url: String) {
+            val trimmed = url.trim()
+            val uri = try { Uri.parse(trimmed) } catch (_: Exception) { return }
+            val scheme = uri.scheme?.lowercase() ?: return
+            val host = uri.host?.lowercase() ?: return
+            if (scheme != "https") return
+            val allowed = host == "accounts.google.com" ||
+                host.endsWith(".run.app") ||
+                trimmed.startsWith(hostedAppUrl)
+            if (!allowed) return
+            runOnUiThread {
+                openExternalOAuthBrowser(uri)
+            }
+        }
     }
 
     private fun openBundledDistAsset(relativePath: String): WebResourceResponse? {
@@ -164,9 +250,15 @@ class MainActivity : ComponentActivity() {
         settings.loadWithOverviewMode = true
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-        // Normalize WebView User-Agent so Google OAuth / Gmail sign-in does not reject with 403 disallowed_useragent
+        // Enable cookies & third-party cookies for Firebase Auth / Google OAuth / Gmail session persistence
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.setAcceptCookie(true)
+        cookieManager.setAcceptThirdPartyCookies(webView, true)
+
+        // Normalize WebView User-Agent and expose native Chrome Custom Tabs OAuth bridge
         val defaultUa = settings.userAgentString
         settings.userAgentString = defaultUa.replace("; wv", "").replace("Version/4.0 ", "")
+        webView.addJavascriptInterface(ZenvikAndroidBridge(), "ZenvikAndroid")
 
         webView.setDownloadListener(DownloadListener { url, _, _, _, _ ->
             try {
@@ -183,6 +275,21 @@ class MainActivity : ComponentActivity() {
                     progressBar.progress = newProgress
                 } else {
                     progressBar.visibility = View.GONE
+                }
+            }
+
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                val origin = request?.origin?.toString()?.trimEnd('/') ?: ""
+                if (origin == localAssetOrigin || origin == hostedAppUrl || origin.endsWith(".run.app")) {
+                    runOnUiThread {
+                        try {
+                            request?.grant(request.resources)
+                        } catch (_: Exception) {
+                            request?.deny()
+                        }
+                    }
+                } else {
+                    request?.deny()
                 }
             }
 
@@ -238,9 +345,11 @@ class MainActivity : ComponentActivity() {
                     this.settings.setSupportMultipleWindows(true)
                     val pUa = this.settings.userAgentString
                     this.settings.userAgentString = pUa.replace("; wv", "").replace("Version/4.0 ", "")
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                     webChromeClient = object : WebChromeClient() {
                         override fun onCloseWindow(window: WebView?) {
                             try {
+                                CookieManager.getInstance().flush()
                                 authDialog.dismiss()
                             } catch (_: Exception) {}
                         }
@@ -272,7 +381,21 @@ class MainActivity : ComponentActivity() {
                 request: WebResourceRequest?
             ): WebResourceResponse? {
                 val uri = request?.url ?: return null
-                return assetLoader.shouldInterceptRequest(uri)
+                if (uri.host.equals("appassets.androidplatform.net", ignoreCase = true)) {
+                    return assetLoader.shouldInterceptRequest(uri)
+                }
+                return null
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // Always expose the live Cloud Run backend URL so bundled offline assets can also call /api/*
+                val escapedUrl = hostedAppUrl.replace("\\", "\\\\").replace("\"", "\\\"")
+                view?.evaluateJavascript(
+                    "window.__ZENVIK_API_BASE__ = \"$escapedUrl\";",
+                    null
+                )
+                CookieManager.getInstance().flush()
             }
 
             override fun shouldOverrideUrlLoading(
@@ -301,11 +424,32 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // Route Google OAuth 2.0 Authorization Code Flow to Chrome Custom Tabs / external browser (never blocked WebView)
+                if (host == "accounts.google.com" && (uri.path?.startsWith("/o/oauth2") == true)) {
+                    openExternalOAuthBrowser(uri)
+                    return true
+                }
+
                 if (host.contains("accounts.google.com") || host.contains("google.com/recaptcha")) {
                     return false
                 }
 
                 return false
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: WebResourceResponse?
+            ) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (request?.isForMainFrame == true) {
+                    val statusCode = errorResponse?.statusCode ?: 0
+                    val failingUrl = request.url?.toString() ?: ""
+                    if (statusCode >= 400 && !failingUrl.startsWith(localAssetOrigin) && hasBundledAssets()) {
+                        view?.loadUrl(localAssetIndexUrl)
+                    }
+                }
             }
 
             override fun onReceivedError(
@@ -316,7 +460,7 @@ class MainActivity : ComponentActivity() {
                 super.onReceivedError(view, request, error)
                 if (request?.isForMainFrame == true) {
                     val failingUrl = request.url?.toString() ?: ""
-                    // If remote URL failed and bundled assets exist, fall back to bundled WebViewAssetLoader origin
+                    // If remote live backend failed and bundled assets exist, fall back seamlessly to local assets
                     if (!failingUrl.startsWith(localAssetOrigin) && hasBundledAssets()) {
                         view?.loadUrl(localAssetIndexUrl)
                         return
@@ -361,7 +505,59 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun isNetworkAvailable(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun isLiveBackendHealthy(): Boolean {
+        var connection: HttpURLConnection? = null
+        return try {
+            val url = URL("$hostedAppUrl/healthz")
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 3500
+                readTimeout = 3500
+                instanceFollowRedirects = true
+            }
+            connection.responseCode in 200..299
+        } catch (_: Exception) {
+            false
+        } finally {
+            try {
+                connection?.disconnect()
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun loadApplication() {
+        // Online-first: if the live full-stack Cloud Run backend is reachable, load it directly so
+        // Express APIs, Gemini AI, English Zero-to-C2, Gmail OAuth, Job Discovery & Firestore run identically.
+        // If offline or unreachable, fall back seamlessly to bundled WebViewAssetLoader assets.
+        if (isNetworkAvailable()) {
+            progressBar.visibility = View.VISIBLE
+            probeExecutor.execute {
+                val backendReady = isLiveBackendHealthy()
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (backendReady) {
+                        webView.loadUrl(hostedAppUrl)
+                    } else if (hasBundledAssets()) {
+                        webView.loadUrl(localAssetIndexUrl)
+                    } else {
+                        webView.loadUrl(hostedAppUrl)
+                    }
+                }
+            }
+            return
+        }
+
         if (hasBundledAssets()) {
             webView.loadUrl(localAssetIndexUrl)
             return
@@ -375,11 +571,15 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        webView.onPause()
         super.onPause()
+        CookieManager.getInstance().flush()
+        webView.onPause()
     }
 
     override fun onDestroy() {
+        try {
+            probeExecutor.shutdownNow()
+        } catch (_: Exception) {}
         webView.destroy()
         super.onDestroy()
     }

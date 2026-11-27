@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - main
+      - master
   workflow_dispatch:
 
 env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || 'ccd---a-better-you-every-day' }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || 'ace-mission-353410' }}
   REGION: europe-west2
   SERVICE_NAME: zenvik-agent-backend
 
@@ -39,10 +40,11 @@ jobs:
   deploy-cloud-run:
     name: Build Container & Deploy to Google Cloud Run
     needs: test-and-verify
-    if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && secrets.GCP_SA_KEY != '')
+    if: github.event_name == 'workflow_dispatch' || ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && secrets.GCP_SA_KEY != '')
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: write
       id-token: write
 
     steps:
@@ -57,21 +59,85 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Configure Active GCP Project & Required APIs
+        run: |
+          gcloud config set project "$PROJECT_ID"
+          gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com --quiet || true
+
       - name: Build & Push Container Image via Cloud Build
         run: |
-          gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA
+          gcloud builds submit --tag "gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA"
 
-      - name: Deploy to Google Cloud Run (europe-west2)
+      - name: Deploy Full-Stack Backend to Google Cloud Run (europe-west2)
+        id: deploy
+        env:
+          SECRET_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SECRET_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SECRET_GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+          SECRET_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          SECRET_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          SECRET_ZENVIK_TOKEN_ENCRYPTION_KEY: ${{ secrets.ZENVIK_TOKEN_ENCRYPTION_KEY }}
         run: |
-          gcloud run deploy $SERVICE_NAME \
-            --image gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA \
-            --region $REGION \
-            --platform managed \
-            --allow-unauthenticated \
-            --port 8080 \
-            --min-instances 0 \
-            --max-instances 10 \
-            --memory 1Gi \
-            --cpu 1 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
-            --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest,ZENVIK_TOKEN_ENCRYPTION_KEY=ZENVIK_TOKEN_ENCRYPTION_KEY:latest"
+          set -euo pipefail
+
+          # Build env-vars file safely (supports special characters without shell escaping issues)
+          ENV_FILE=$(mktemp)
+          echo "NODE_ENV: \"production\"" >> "$ENV_FILE"
+          echo "GOOGLE_CLOUD_PROJECT: \"$PROJECT_ID\"" >> "$ENV_FILE"
+
+          SECRET_FLAGS=""
+          add_secret_or_env() {
+            local key="$1"
+            local val="$2"
+            if [ -n "$val" ]; then
+              printf '%s: "%s"\n' "$key" "$(printf '%s' "$val" | sed 's/"/\\"/g')" >> "$ENV_FILE"
+            elif gcloud secrets describe "$key" --project="$PROJECT_ID" >/dev/null 2>&1; then
+              if [ -n "$SECRET_FLAGS" ]; then
+                SECRET_FLAGS="${SECRET_FLAGS},${key}=${key}:latest"
+              else
+                SECRET_FLAGS="${key}=${key}:latest"
+              fi
+            fi
+          }
+
+          add_secret_or_env "GEMINI_API_KEY" "$SECRET_GEMINI_API_KEY"
+          add_secret_or_env "OPENAI_API_KEY" "$SECRET_OPENAI_API_KEY"
+          add_secret_or_env "GROK_API_KEY" "$SECRET_GROK_API_KEY"
+          add_secret_or_env "GOOGLE_CLIENT_ID" "$SECRET_GOOGLE_CLIENT_ID"
+          add_secret_or_env "GOOGLE_CLIENT_SECRET" "$SECRET_GOOGLE_CLIENT_SECRET"
+          add_secret_or_env "ZENVIK_TOKEN_ENCRYPTION_KEY" "$SECRET_ZENVIK_TOKEN_ENCRYPTION_KEY"
+
+          DEPLOY_ARGS=(
+            run deploy "$SERVICE_NAME"
+            --image "gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA"
+            --region "$REGION"
+            --platform managed
+            --allow-unauthenticated
+            --port 8080
+            --min-instances 0
+            --max-instances 10
+            --memory 1Gi
+            --cpu 1
+            --env-vars-file "$ENV_FILE"
+          )
+
+          if [ -n "$SECRET_FLAGS" ]; then
+            DEPLOY_ARGS+=(--set-secrets "$SECRET_FLAGS")
+          fi
+
+          gcloud "${DEPLOY_ARGS[@]}"
+          rm -f "$ENV_FILE"
+
+          SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)')
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed Live Cloud Run Backend URL: $SERVICE_URL"
+
+      - name: Trigger Android APK Rebuild Pointing to Live Cloud Run URL
+        if: steps.deploy.outputs.service_url != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build-android-apk.yml \
+            --ref "${{ github.ref_name }}" \
+            -f backend_url="${{ steps.deploy.outputs.service_url }}"

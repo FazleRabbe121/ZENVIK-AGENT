@@ -255,3 +255,89 @@ BEGIN
       FOR ALL USING (user_id = auth.uid()::text) WITH CHECK (user_id = auth.uid()::text);
   END IF;
 END $$;
+
+-- ============================================================================
+-- MIGRATION EXTENSION: AUTH HARDENING, GEMINI BYOK & SERVER-ENFORCED GUEST MODE
+-- ============================================================================
+
+ALTER TABLE public.zenvik_users
+  ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ;
+
+-- 12. Per-User Encrypted Gemini API Key (BYOK) & Usage Tracking
+CREATE TABLE IF NOT EXISTS public.zenvik_user_gemini_configs (
+  user_id TEXT PRIMARY KEY REFERENCES public.zenvik_users (user_id) ON DELETE CASCADE,
+  encrypted_api_key JSONB,
+  key_masked TEXT,
+  selected_model TEXT NOT NULL DEFAULT 'gemini-4-hydrogen',
+  status TEXT NOT NULL DEFAULT 'unconfigured' CHECK (status IN ('unconfigured', 'connected', 'invalid', 'quota_exceeded', 'error')),
+  last_verified_at TIMESTAMPTZ,
+  last_error TEXT,
+  usage_requests INTEGER NOT NULL DEFAULT 0,
+  usage_errors INTEGER NOT NULL DEFAULT 0,
+  last_used_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 13. Password Reset Tokens (SHA-256 hashed tokens only — never plaintext)
+CREATE TABLE IF NOT EXISTS public.zenvik_password_reset_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES public.zenvik_users (user_id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  used BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_zenvik_password_reset_user ON public.zenvik_password_reset_tokens (user_id, expires_at DESC);
+
+-- 14. Email Verification Tokens (SHA-256 hashed tokens only)
+CREATE TABLE IF NOT EXISTS public.zenvik_email_verification_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES public.zenvik_users (user_id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  used BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_zenvik_email_verif_user ON public.zenvik_email_verification_tokens (user_id, expires_at DESC);
+
+-- 15. Server-Side Revoked Session JTIs (Logout & Password Reset Invalidation)
+CREATE TABLE IF NOT EXISTS public.zenvik_revoked_sessions (
+  jti TEXT PRIMARY KEY,
+  revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_zenvik_revoked_sessions_exp ON public.zenvik_revoked_sessions (expires_at);
+
+-- 16. Server-Enforced Temporary Guest Sessions (2–4 min max, fingerprint-bound anti-bypass)
+CREATE TABLE IF NOT EXISTS public.zenvik_guest_sessions (
+  guest_id TEXT PRIMARY KEY,
+  client_fingerprint TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  duration_seconds INTEGER NOT NULL DEFAULT 180 CHECK (duration_seconds BETWEEN 120 AND 240),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'ended')),
+  emails_sent_count INTEGER NOT NULL DEFAULT 0,
+  ai_requests_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_zenvik_guest_sessions_fp ON public.zenvik_guest_sessions (client_fingerprint, created_at DESC);
+
+ALTER TABLE public.zenvik_user_gemini_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.zenvik_password_reset_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.zenvik_email_verification_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.zenvik_revoked_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.zenvik_guest_sessions ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+    CREATE POLICY IF NOT EXISTS zenvik_gemini_byok_self_access ON public.zenvik_user_gemini_configs
+      FOR ALL USING (user_id = auth.uid()::text) WITH CHECK (user_id = auth.uid()::text);
+  END IF;
+END $$;
+

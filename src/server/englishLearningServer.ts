@@ -16,6 +16,8 @@ export const englishLearningRouter = express.Router();
 const GEMINI_MODEL = 'gemini-4-hydrogen';
 const PACKAGE_RELATIVE_PATH =
   'public/assets/aistudio/English_Zero_to_C2_Master_Course_v2_SINGLE_FILE__2__e49f1579.json';
+const PACKAGE_FALLBACK_RELATIVE_PATH =
+  'data/English_Zero_to_C2_Master_Course_v2_SINGLE_FILE.json';
 const LESSON_CACHE_PATH = path.resolve(process.cwd(), 'data/english_generated_lessons_cache.json');
 
 const CEFR_ORDER: CEFRLevel[] = ['Pre-A1', 'A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
@@ -239,9 +241,13 @@ function inspectVocabQuality(item: VocabItem): VocabItem {
 function loadCourseStore(): LoadedCourseStore {
   if (cachedStore) return cachedStore;
 
-  const fullPath = path.resolve(process.cwd(), PACKAGE_RELATIVE_PATH);
+  const primaryPath = path.resolve(process.cwd(), PACKAGE_RELATIVE_PATH);
+  const fallbackPath = path.resolve(process.cwd(), PACKAGE_FALLBACK_RELATIVE_PATH);
+  const fullPath = fs.existsSync(primaryPath) ? primaryPath : fallbackPath;
   if (!fs.existsSync(fullPath)) {
-    throw new Error(`Course package JSON missing at ${PACKAGE_RELATIVE_PATH}`);
+    throw new Error(
+      `Course package JSON missing at ${PACKAGE_RELATIVE_PATH} and ${PACKAGE_FALLBACK_RELATIVE_PATH}`
+    );
   }
 
   const pkg = JSON.parse(fs.readFileSync(fullPath, 'utf8'));

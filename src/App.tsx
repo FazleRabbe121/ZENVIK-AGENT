@@ -1,8 +1,17 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { onSnapshot, collection, doc } from 'firebase/firestore';
-import { Loader2, AlertTriangle, RotateCcw, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { Loader2, AlertTriangle, RotateCcw, ShieldCheck, CheckCircle2, Clock, UserPlus } from 'lucide-react';
 import { auth, db, signInWithGoogle, logOut as firebaseLogOut, saveRelapse, deleteRelapseRecord, saveFinance, deleteFinanceRecord, saveFamilyMoney, deleteFamilyMoneyRecord, saveRecipe, deleteRecipeRecord, saveReport, deleteReportRecord, saveUserSettings, saveUserProfile } from './services/firebase';
+import {
+  getMultiUserSessionToken,
+  getGuestSessionToken,
+  fetchGuestSessionStatus,
+  endGuestSession,
+  logoutMultiUserAccount,
+  signInWithGoogleUnified,
+  GuestSessionStatus,
+} from './services/multiUserService';
 import { loadLocalState, saveLocalState } from './services/localStore';
 import { syncAndLoadCloudCVLibrary } from './services/cvStorage';
 import {
@@ -72,6 +81,7 @@ import { AIReportModal } from './components/AIReportModal';
 import { EducationalUrgeGuide } from './components/EducationalUrgeGuide';
 import { AndroidExportModal } from './components/AndroidExportModal';
 import { DeveloperGateModal, AppAccessLevel } from './components/DeveloperGateModal';
+import { FirstTimeSetupWizard } from './components/FirstTimeSetupWizard';
 import { useTheme } from './context/ThemeContext';
 
 export default function App() {
@@ -83,6 +93,12 @@ export default function App() {
     if (isDedicatedInterviewPortalUrl()) {
       return 'interview-only';
     }
+    if (getMultiUserSessionToken()) {
+      return 'full';
+    }
+    if (getGuestSessionToken()) {
+      return 'guest';
+    }
     const stored = localStorage.getItem('app_access_level_auth');
     if (stored === 'full' || stored === 'cv-only' || stored === 'interview-only') {
       return stored;
@@ -92,6 +108,9 @@ export default function App() {
     }
     return 'none';
   });
+  const [guestRemainingSec, setGuestRemainingSec] = useState<number | null>(null);
+  const [guestExpiredReason, setGuestExpiredReason] = useState<string | null>(null);
+  const [isOnboardingWizardOpen, setIsOnboardingWizardOpen] = useState<boolean>(false);
 
   // Listen for URL hash or history changes that point to the dedicated Interview Portal
   useEffect(() => {
@@ -185,6 +204,63 @@ export default function App() {
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  // Server-Enforced Guest Mode Countdown & Expiration Listener (Cannot be bypassed by refresh or clock tampering)
+  useEffect(() => {
+    const onGuestExpired = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail;
+      setGuestRemainingSec(0);
+      setGuestExpiredReason(
+        detail?.message ||
+          'Your temporary Guest Preview session has expired. Please Sign Up or Log In to continue using ZENVIK AGENT.'
+      );
+      setAccessLevel('none');
+    };
+    window.addEventListener('zenvik_guest_expired', onGuestExpired);
+    return () => window.removeEventListener('zenvik_guest_expired', onGuestExpired);
+  }, []);
+
+  useEffect(() => {
+    if (accessLevel !== 'guest') {
+      setGuestRemainingSec(null);
+      return;
+    }
+
+    let cancelled = false;
+    const syncWithServer = async () => {
+      const status: GuestSessionStatus = await fetchGuestSessionStatus();
+      if (cancelled) return;
+      if (!status.active || status.expired || status.remainingSeconds <= 0) {
+        setGuestRemainingSec(0);
+        setGuestExpiredReason(
+          status.error ||
+            'Your temporary Guest Preview session has expired. Please Sign Up or Log In to continue.'
+        );
+        setAccessLevel('none');
+      } else {
+        setGuestRemainingSec(status.remainingSeconds);
+      }
+    };
+
+    syncWithServer();
+    const serverPoll = setInterval(syncWithServer, 15000);
+    const localTick = setInterval(() => {
+      setGuestRemainingSec(prev => {
+        if (prev === null) return null;
+        if (prev <= 1) {
+          syncWithServer();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(serverPoll);
+      clearInterval(localTick);
+    };
+  }, [accessLevel]);
 
   // Save to localStorage whenever appState updates
   useEffect(() => {
@@ -404,6 +480,17 @@ export default function App() {
     try {
       const result = await signInWithGoogle();
       if (result) {
+        try {
+          const idToken = await result.user.getIdToken();
+          await signInWithGoogleUnified({
+            idToken,
+            email: result.user.email || undefined,
+            displayName: result.user.displayName || undefined,
+            uid: result.user.uid,
+          });
+        } catch {}
+        setAccessLevel('full');
+        setGuestExpiredReason(null);
         setAuthNotice(`Signed in as ${result.user.displayName || result.user.email}`);
         setTimeout(() => setAuthNotice(null), 3500);
       }
@@ -416,10 +503,14 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await firebaseLogOut();
+      await logoutMultiUserAccount();
+      await firebaseLogOut().catch(() => {});
+      localStorage.removeItem('app_access_level_auth');
+      localStorage.removeItem('app_dev_authorized_89056');
       setUser(null);
       setIsCloudSynced(false);
-      setAuthNotice('Logged out safely. Switched to local mode.');
+      setAccessLevel('none');
+      setAuthNotice('Logged out safely and revoked server session.');
       setTimeout(() => setAuthNotice(null), 3000);
     } catch (err) {
       console.error('Logout error:', err);
@@ -747,7 +838,17 @@ export default function App() {
   if (accessLevel === 'none') {
     return (
       <DeveloperGateModal
-        onAuthorize={(level) => setAccessLevel(level)}
+        guestExpiredReason={guestExpiredReason}
+        onAuthorize={(level, meta) => {
+          setGuestExpiredReason(null);
+          if (level === 'guest' && meta?.guestSession) {
+            setGuestRemainingSec(meta.guestSession.remainingSeconds);
+          }
+          setAccessLevel(level);
+          if (level === 'full' && meta?.isNewRegistration) {
+            setIsOnboardingWizardOpen(true);
+          }
+        }}
       />
     );
   }
@@ -822,8 +923,16 @@ export default function App() {
         approvedCount={navCounts.approved}
         historyCount={navCounts.history}
         rejectionsCount={navCounts.rejections}
-        userEmail={user?.email || 'fazle.rabbe.doc@gmail.com'}
-        userName={user?.displayName || 'Fazle Rabbi'}
+        userEmail={
+          accessLevel === 'guest'
+            ? 'Guest Preview Mode'
+            : user?.email || localStorage.getItem('zenvik_multiuser_active_email_v1') || 'Signed In User'
+        }
+        userName={
+          accessLevel === 'guest'
+            ? 'Guest Preview'
+            : user?.displayName || localStorage.getItem('zenvik_multiuser_active_name_v1') || 'ZENVIK Member'
+        }
       />
 
       {/* Main Content Shell (offset by desktop sidebar width) */}
@@ -832,6 +941,35 @@ export default function App() {
           isSidebarCollapsed ? 'lg:pl-[72px]' : 'lg:pl-64'
         }`}
       >
+        {/* Server-Enforced Guest Mode Countdown Banner */}
+        {accessLevel === 'guest' && (
+          <div className="px-4 py-2.5 bg-amber-500/15 dark:bg-amber-950/60 border-b border-amber-400/40 text-amber-900 dark:text-amber-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 font-semibold">
+              <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+              <span>
+                Guest Preview Mode —{' '}
+                <strong className="font-mono">
+                  {guestRemainingSec !== null
+                    ? `${Math.floor(guestRemainingSec / 60)}:${String(guestRemainingSec % 60).padStart(2, '0')}`
+                    : 'Syncing...'}
+                </strong>{' '}
+                remaining (server-enforced). Uses platform owner&apos;s backend AI &amp; Gmail relay with zero access to private accounts.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                await endGuestSession();
+                setAccessLevel('none');
+              }}
+              className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Sign Up / Log In</span>
+            </button>
+          </div>
+        )}
+
         {/* Main Top Navigation Bar */}
         <Navbar
           user={user}
@@ -844,9 +982,8 @@ export default function App() {
           onOpenAndroidExport={() => setCurrentTab('apps-center')}
           onOpenCVBuilder={() => setCurrentTab('cv-library')}
           onOpenApplyByEmail={() => setCurrentTab('gmail-center')}
-          onLockApp={() => {
-            localStorage.removeItem('app_access_level_auth');
-            setAccessLevel('none');
+          onLockApp={async () => {
+            await handleLogout();
           }}
           onToggleMobileMenu={() => setIsMobileSidebarOpen(prev => !prev)}
         />
@@ -1306,6 +1443,14 @@ export default function App() {
         <AndroidExportModal
           isOpen={isAndroidExportOpen}
           onClose={() => setIsAndroidExportOpen(false)}
+        />
+      )}
+
+      {isOnboardingWizardOpen && (
+        <FirstTimeSetupWizard
+          isOpen={isOnboardingWizardOpen}
+          onClose={() => setIsOnboardingWizardOpen(false)}
+          onCompleted={() => setIsOnboardingWizardOpen(false)}
         />
       )}
     </div>

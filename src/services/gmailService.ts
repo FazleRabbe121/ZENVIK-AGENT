@@ -212,9 +212,16 @@ export function syncActiveGmailSenderInMemory(params: {
 
 export function loadAuthorizedSenderAccounts(): AuthorizedGmailSenderAccount[] {
   const today = new Date().toISOString().slice(0, 10);
-  const primaryEmail = (auth.currentUser?.email || getCachedUserEmail() || 'fazle.rabbe.doc@gmail.com').trim();
+  const storedMultiUserEmail = (() => {
+    try {
+      return localStorage.getItem('zenvik_multiuser_active_email_v1') || '';
+    } catch {
+      return '';
+    }
+  })();
+  const primaryEmail = (auth.currentUser?.email || storedMultiUserEmail || getCachedUserEmail() || '').trim();
   const primaryLower = primaryEmail.toLowerCase();
-  const primaryName = auth.currentUser?.displayName || getCachedUserName() || 'Fazle Rabbi';
+  const primaryName = auth.currentUser?.displayName || getCachedUserName() || (primaryEmail ? primaryEmail.split('@')[0] : 'Not Connected');
   const currentToken = getCachedGoogleToken();
   const isExpired = isGoogleTokenExpired();
 
@@ -316,7 +323,8 @@ export function recordSenderAccountActivity(params: {
 }): void {
   const today = new Date().toISOString().slice(0, 10);
   const accounts = loadAuthorizedSenderAccounts();
-  const lower = (params.email || auth.currentUser?.email || 'fazle.rabbe.doc@gmail.com').trim().toLowerCase();
+  const lower = (params.email || auth.currentUser?.email || getCachedUserEmail() || '').trim().toLowerCase();
+  if (!lower) return;
   let found = false;
 
   const updated = accounts.map(acc => {
@@ -336,8 +344,8 @@ export function recordSenderAccountActivity(params: {
 
   if (!found) {
     updated.push({
-      email: params.email || auth.currentUser?.email || 'fazle.rabbe.doc@gmail.com',
-      displayName: getCachedUserName() || 'Fazle Rabbi',
+      email: params.email || auth.currentUser?.email || lower,
+      displayName: getCachedUserName() || lower.split('@')[0],
       isPrimaryDefault: updated.length === 0,
       isActive: true,
       sentTodayCount: params.sentSuccess ? 1 : 0,
@@ -882,9 +890,9 @@ export function saveLocalSendingHistory(history: GmailSendingRecord[]) {
     const { deduped } = deduplicateSendingHistoryRecords(Array.isArray(history) ? history : []);
     localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(deduped));
     
-    // Cloud sync to Firestore under user UID and email account
+    // Cloud sync to Firestore strictly under authenticated user UID (never fall back to owner account)
     const currentUser = auth.currentUser;
-    const targetEmail = currentUser?.email || getCachedUserEmail() || 'fazle.rabbe.doc@gmail.com';
+    const targetEmail = currentUser?.email || getCachedUserEmail() || '';
 
     if (currentUser?.uid) {
       syncHistoryToCloud(currentUser.uid, deduped).catch(err =>
@@ -1748,6 +1756,7 @@ export async function sendJobApplicationViaGmail(params: {
   allowResend?: boolean;
   isTestDelivery?: boolean;
   attemptCount?: number;
+  guestOwnerAccountConfirmed?: boolean;
 }): Promise<SendJobApplicationResult> {
   let releaseMutex: () => void = () => {};
   const previousMutex = activeSendMutex;
@@ -2039,9 +2048,135 @@ export async function sendJobApplicationViaGmail(params: {
       bodyText: cleanedText,
     });
 
+    const backendSessionToken = (() => {
+      try {
+        return localStorage.getItem('zenvik_multiuser_session_token_v1');
+      } catch {
+        return null;
+      }
+    })();
+    const guestSessionToken = (() => {
+      try {
+        return localStorage.getItem('zenvik_guest_session_token_v1');
+      } catch {
+        return null;
+      }
+    })();
+
+    // Route through secure backend /api/gmail/send when user connected via Server OAuth 2.0 (encrypted tokens)
+    // OR when operating inside an active server-enforced Guest Preview session
+    if ((!token && backendSessionToken) || (!backendSessionToken && guestSessionToken)) {
+      try {
+        const authToken = backendSessionToken || guestSessionToken!;
+        const backendHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        };
+        if (!backendSessionToken && guestSessionToken) {
+          backendHeaders['X-Zenvik-Guest-Token'] = guestSessionToken;
+        }
+        const backendRes = await fetch('/api/gmail/send', {
+          method: 'POST',
+          headers: backendHeaders,
+          body: JSON.stringify({
+            recipients: [
+              {
+                recipientEmail: cleanRecipient,
+                company: params.company || '',
+                position: params.position || cleanSubject,
+              },
+            ],
+            subject: cleanSubject,
+            coverLetter: cleanedText,
+            cvId: activeCvIdUsed || params.selectedCvId || undefined,
+            inlineCv: effectivePdfBase64
+              ? {
+                  id: activeCvIdUsed || params.selectedCvId || 'inline-cv',
+                  fileName: effectivePdfFilename,
+                  pdfBase64: effectivePdfBase64,
+                }
+              : null,
+            coverLetterPdf: effectiveClPdfBase64
+              ? {
+                  fileName: effectiveClPdfFilename || 'Cover_Letter.pdf',
+                  pdfBase64: effectiveClPdfBase64,
+                }
+              : null,
+            userConfirmedSend: true,
+            guestOwnerAccountConfirmed: Boolean(params.guestOwnerAccountConfirmed),
+          }),
+        });
+        const backendData = await backendRes.json().catch(() => ({}));
+        if (backendRes.status === 401 && (backendData?.guestExpired || backendData?.errorCode === 'GUEST_SESSION_EXPIRED')) {
+          try {
+            localStorage.removeItem('zenvik_guest_session_token_v1');
+          } catch {}
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('zenvik_guest_expired', { detail: backendData }));
+          }
+          return {
+            success: false,
+            error: backendData?.error || 'Your Guest Preview session has expired. Please Sign Up or Log In to continue.',
+            errorCategory: 'auth',
+            trackingStatus: 'needs_action',
+          };
+        }
+        const firstResult = Array.isArray(backendData?.results) ? backendData.results[0] : backendData;
+        if ((backendRes.ok || backendRes.status === 207) && (firstResult?.status === 'sent' || firstResult?.gmailMessageId)) {
+          const msgId = firstResult.gmailMessageId || backendData.gmailMessageId || `gmail_${Date.now()}`;
+          const thId = firstResult.gmailThreadId || backendData.gmailThreadId;
+          savePersistentSubmission({
+            submissionId,
+            recipient: cleanRecipient,
+            company: params.company || 'Employer',
+            position: params.position || cleanSubject,
+            status: 'accepted_by_gmail',
+            messageId: msgId,
+            threadId: thId,
+            updatedAt: new Date().toISOString(),
+          });
+          return {
+            success: true,
+            messageId: msgId,
+            threadId: thId,
+            trackingStatus: 'accepted_by_gmail',
+            attachedCvFilename: effectivePdfFilename,
+            isUploadedCv,
+          };
+        }
+        const failErr =
+          firstResult?.errorReason ||
+          backendData?.message ||
+          backendData?.error ||
+          'Backend Gmail dispatch failed. Please check your personal Gmail connection.';
+        preserveOnFailure(failErr, 'needs_action', 'auth', 'needs_action');
+        return {
+          success: false,
+          error: failErr,
+          errorCategory: backendRes.status === 401 || backendRes.status === 403 ? 'auth' : 'outage',
+          trackingStatus: 'needs_action',
+          attachedCvFilename: effectivePdfFilename,
+          isUploadedCv,
+          webmailUrl,
+        };
+      } catch (backendErr: any) {
+        const netErr = backendErr?.message || 'Could not reach backend Gmail dispatch service.';
+        preserveOnFailure(netErr, 'temporary_delivery_failure', 'outage', 'failed');
+        return {
+          success: false,
+          error: netErr,
+          errorCategory: 'outage',
+          trackingStatus: 'temporary_delivery_failure',
+          attachedCvFilename: effectivePdfFilename,
+          isUploadedCv,
+          webmailUrl,
+        };
+      }
+    }
+
     if (!token) {
       const errMsg =
-        'NEEDS_ACTION (Authorization Required): Gmail session is not connected or expired. Please click Connect Gmail Account.';
+        'NEEDS_ACTION (Authorization Required): Personal Gmail is not connected or expired. Please click Connect Personal Gmail.';
       preserveOnFailure(errMsg, 'needs_action', 'auth', 'needs_action');
       return {
         success: false,
@@ -2819,6 +2954,7 @@ export const GmailService = {
     cvTitle?: string;
     allowResend?: boolean;
     isTestDelivery?: boolean;
+    guestOwnerAccountConfirmed?: boolean;
   }): Promise<SendJobApplicationResult> {
     return sendJobApplicationViaGmail({
       recipient: params.to,
@@ -2837,6 +2973,7 @@ export const GmailService = {
       cvTitle: params.cvTitle,
       allowResend: params.allowResend,
       isTestDelivery: params.isTestDelivery,
+      guestOwnerAccountConfirmed: params.guestOwnerAccountConfirmed,
     });
   },
 

@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.zenvik.agent',
+  appId: 'com.ccd.abetteryou',
   appName: 'ZENVIK-AGENT',
   webDir: 'dist',
   server: {

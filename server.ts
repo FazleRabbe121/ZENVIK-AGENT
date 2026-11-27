@@ -54,6 +54,52 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// CORS support for Android WebViewAssetLoader, Capacitor, GitHub Pages, and Cloud Run clients
+const extraAllowedCorsOrigins = new Set(
+  String(process.env.ALLOWED_CORS_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean)
+);
+
+function isAllowedCorsOrigin(origin: string): boolean {
+  if (!origin) return false;
+  if (extraAllowedCorsOrigins.has(origin)) return true;
+  if (
+    origin === 'https://appassets.androidplatform.net' ||
+    origin === 'capacitor://localhost' ||
+    origin === 'ionic://localhost' ||
+    origin === 'https://localhost' ||
+    origin === 'http://localhost' ||
+    /^https?:\/\/localhost:\d+$/.test(origin) ||
+    /^https?:\/\/127\.0\.0\.1(?::\d+)?$/.test(origin) ||
+    /^https:\/\/[a-z0-9-]+\.github\.io$/i.test(origin) ||
+    /^https:\/\/[a-z0-9-]+\.run\.app$/i.test(origin) ||
+    /^https:\/\/[a-z0-9-]+\.a\.run\.app$/i.test(origin)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const origin = String(req.headers.origin || '').trim();
+  if (origin && isAllowedCorsOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, X-Session-Token, X-Webhook-Secret, X-Requested-With'
+    );
+  }
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 // Sliding-Window API Rate Limiter (protects auth, Gmail send, and AI endpoints from abuse)
@@ -118,10 +164,42 @@ function hasConfiguredGeminiKey(): boolean {
   return Boolean(key && key.length > 5 && key !== 'undefined' && key !== 'null');
 }
 
-// Initialize Google Gen AI with server-side environment key
-const getAIClient = () => {
+// Server-Side Guest Expiration Enforcement Guard across all protected /api routes
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const pathClean = req.path || '';
+  // Allow auth, guest lifecycle, health, and OAuth callback endpoints even when a stale guest header is sent
+  if (
+    pathClean === '/health' ||
+    pathClean.startsWith('/multiuser/auth/') ||
+    pathClean.startsWith('/multiuser/guest/') ||
+    pathClean.startsWith('/gmail/oauth/')
+  ) {
+    return next();
+  }
+  const authHeader = String(req.headers.authorization || '').trim();
+  const explicitGuest = String(req.headers['x-zenvik-guest-token'] || '').trim();
+  const guestToken = explicitGuest || (authHeader.startsWith('Bearer gst.') ? authHeader.slice(7).trim() : '');
+  if (!guestToken) return next();
+
+  const resolvedGuest = defaultMultiUserSaaS.resolveGuestSessionFromToken(guestToken);
+  if (!resolvedGuest.ok) {
+    return res.status(401).json({
+      success: false,
+      error: resolvedGuest.message || 'Your Guest Preview session has expired. Please Sign Up or Log In to continue.',
+      errorCode: resolvedGuest.errorCode || 'GUEST_SESSION_EXPIRED',
+      guestExpired: true,
+      requiresAuth: true,
+    });
+  }
+  return next();
+});
+
+// Initialize Google Gen AI with user BYOK key (when authenticated & configured) or server-side environment key
+const getAIClient = (req?: Request) => {
+  const resolved = req ? defaultMultiUserSaaS.resolveGeminiKeyForRequest(req) : null;
+  const apiKey = resolved?.apiKey || process.env.GEMINI_API_KEY;
   return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
+    apiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -138,7 +216,7 @@ app.post('/api/ai/chat', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Messages array is required' });
     }
 
-    const ai = getAIClient();
+    const ai = getAIClient(req);
 
     const systemPrompt = `You are the executive personal growth coach and intelligence assistant for "CCD — A Better You Every Day".
 Your core mission is to empower the user in:
@@ -194,7 +272,7 @@ app.post('/api/ai/report', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Stats payload is required' });
     }
 
-    const ai = getAIClient();
+    const ai = getAIClient(req);
 
     const prompt = `You are the Lead Analyst for CCD — A Better You Every Day.
 Generate an executive, structured personal monthly report strictly based on the following authenticated data.
@@ -289,13 +367,16 @@ ${Object.entries(stats?.expenses?.byCategory || {})
 });
 
 // Download Complete Project Zip Route (For GitHub / Local / Android build)
-app.get('/api/export/project-zip', (req: Request, res: Response) => {
+const serveCompleteProjectZip = (req: Request, res: Response) => {
+  const freshDataZipPath = path.join(__dirname, 'data', 'zenvik-agent-complete-project.zip');
   const completeZipPath = path.join(__dirname, 'public', 'zenvik-agent-complete-project.zip');
   const legacyZipPath = path.join(__dirname, 'public', 'ccd-hospitality-full-project.zip');
   const requestedVariant = String(req.query.variant || '').toLowerCase();
   const targetPath =
     requestedVariant === 'legacy' && fs.existsSync(legacyZipPath)
       ? legacyZipPath
+      : fs.existsSync(freshDataZipPath)
+      ? freshDataZipPath
       : fs.existsSync(completeZipPath)
       ? completeZipPath
       : legacyZipPath;
@@ -306,7 +387,10 @@ app.get('/api/export/project-zip', (req: Request, res: Response) => {
     return res.sendFile(targetPath);
   }
   return res.status(404).json({ error: 'Project zip file not found' });
-});
+};
+
+app.get('/api/export/project-zip', serveCompleteProjectZip);
+app.get('/ccd-hospitality-full-project.zip', serveCompleteProjectZip);
 
 // ========================================================
 // 3-AI AUTOMATED JOB APPLICATION ENGINE
@@ -1444,7 +1528,7 @@ app.post('/api/ai/classify-reply', async (req: Request, res: Response) => {
     const targetEmployer = employerName || company || 'Employer';
     const targetContent = emailSnippet || bodySnippet || subject || '';
 
-    const ai = getAIClient();
+    const ai = getAIClient(req);
 
     const prompt = `You are an executive European recruitment communications analyst.
 Analyze the following incoming email from employer "${targetEmployer}" regarding role "${role || 'Hospitality Position'}".
@@ -1654,7 +1738,7 @@ app.post('/api/ai/personalize-cover-letter', async (req: Request, res: Response)
       return res.status(400).json({ error: 'Company and position are required for personalization.' });
     }
 
-    const ai = getAIClient();
+    const ai = getAIClient(req);
     const cvContextBlock = cvSummary
       ? `CANDIDATE'S ACTUAL SELECTED CV DATA (FROM CENTRAL CV LIBRARY):\n${typeof cvSummary === 'string' ? cvSummary : JSON.stringify(cvSummary, null, 2)}`
       : `CANDIDATE'S VERIFIED CAREER HISTORY:
@@ -1955,7 +2039,7 @@ app.post('/api/ai/jobs/search', async (req: Request, res: Response) => {
       ],
     } = req.body;
 
-    const ai = getAIClient();
+    const ai = getAIClient(req);
 
     const prompt = `You are a European hospitality recruitment and job verification specialist.
 Use Google Search in real-time to find real, currently active job postings across Europe for these target positions:
@@ -2389,7 +2473,7 @@ app.post('/api/ai/jobs/pipeline', async (req: Request, res: Response) => {
         : defaultEuropeLocations;
 
     // 1. Gemini Search with Freshness & Cache-Bypass
-    const ai = getAIClient();
+    const ai = getAIClient(req);
     const queryNonce = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const prompt = isCyprusMarket
       ? `You are an expert hospitality recruitment specialist for the Republic of Cyprus.
@@ -3402,7 +3486,7 @@ app.post('/api/jobs/ai-flexible-search', async (req: Request, res: Response) => 
       recommendedFilters = cachedEntry.recommendedFilters;
     } else if (Boolean(useAiDiscovery) && canConsumeGeminiQuota(1)) {
       try {
-        const ai = getAIClient();
+        const ai = getAIClient(req);
         recordGeminiQuotaUsage(1);
         const searchPrompt = `You are a global recruitment & work-permit intelligence assistant powered by Gemini.
 Analyze the candidate's CV summary and search criteria, recommend optimal filters, and discover up to 5 real, currently active job opportunities matching their search criteria (prioritizing Bartender, Barman, Barista, Mixologist, Bar Supervisor, Waiter, Food & Beverage, or any role requested).
@@ -3614,9 +3698,11 @@ app.post('/api/gmail/send', async (req: Request, res: Response, next: NextFuncti
     'cvId' in bodyObj ||
     'coverLetter' in bodyObj ||
     authHeader.startsWith('Bearer zvk.') ||
-    Boolean(req.headers['x-zenvik-session-token']);
+    authHeader.startsWith('Bearer gst.') ||
+    Boolean(req.headers['x-zenvik-session-token']) ||
+    Boolean(req.headers['x-zenvik-guest-token']);
 
-  // Delegate multi-user SaaS requests cleanly to defaultMultiUserSaaS.router (fixes route shadowing)
+  // Delegate multi-user SaaS & Guest Mode requests cleanly to defaultMultiUserSaaS.router
   if (isMultiUserPayload) {
     return next();
   }

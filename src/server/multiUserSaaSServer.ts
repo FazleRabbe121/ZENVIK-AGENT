@@ -15,6 +15,7 @@ const DATA_DIR = path.resolve(__dirname, '../../data');
 const DEFAULT_DB_FILE = path.join(DATA_DIR, 'multiuser_saas_db.json');
 
 export const GMAIL_SEND_ONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
+export const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 export const OAUTH_EMAIL_IDENTITY_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
 export const PRIMARY_ADMIN_EMAIL = 'fazle.rabbe.doc@gmail.com';
 export const LEGACY_ADMIN_EMAIL = 'fazlerabbe905@gmail.com';
@@ -22,6 +23,17 @@ export const ADMIN_EMAIL_ALLOWLIST = new Set([
   PRIMARY_ADMIN_EMAIL.toLowerCase(),
   LEGACY_ADMIN_EMAIL.toLowerCase(),
 ]);
+export const SUPPORTED_GEMINI_BYOK_MODELS = [
+  'gemini-4-hydrogen',
+  'gemini-3.1-flash-lite',
+  'gemini-4-neon',
+  'gemini-4-carbon',
+] as const;
+export const DEFAULT_GEMINI_BYOK_MODEL = 'gemini-4-hydrogen';
+export const DEFAULT_GUEST_DURATION_SECONDS = 180;
+export const MIN_GUEST_DURATION_SECONDS = 120;
+export const MAX_GUEST_DURATION_SECONDS = 240;
+export const MAX_GUEST_EMAILS_PER_SESSION = 3;
 
 export const SUPPORTED_JOB_CATEGORIES = [
   'Bartender',
@@ -135,6 +147,9 @@ export interface MultiUserAccountRecord {
   defaultCoverLetter: string;
   dailySendLimit: number;
   minDelaySeconds: number;
+  emailVerified?: boolean;
+  emailVerifiedAt?: string | null;
+  passwordChangedAt?: number | null;
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string;
@@ -228,9 +243,78 @@ interface PendingOAuthStateRecord {
   stateId: string;
   userId: string;
   redirectUri: string;
+  requestedScopes?: string[];
+  platform?: 'web' | 'android';
+  appDeepLink?: string | null;
   createdAt: number;
   expiresAt: number;
   used: boolean;
+}
+
+export interface StoredUserGeminiConfig {
+  userId: string;
+  encryptedApiKey: EncryptedSecretPayload | null;
+  keyMasked: string | null;
+  selectedModel: string;
+  status: 'connected' | 'invalid' | 'quota_exceeded' | 'unconfigured';
+  verifiedAt?: string | null;
+  lastTestedAt?: string | null;
+  lastUsedAt?: string | null;
+  lastError?: string | null;
+  totalRequests: number;
+  totalErrors: number;
+  updatedAt: string;
+}
+
+export interface PasswordResetTokenRecord {
+  tokenHash: string;
+  userId: string;
+  email: string;
+  createdAt: number;
+  expiresAt: number;
+  used: boolean;
+}
+
+export interface EmailVerificationTokenRecord {
+  tokenHash: string;
+  userId: string;
+  email: string;
+  createdAt: number;
+  expiresAt: number;
+  used: boolean;
+}
+
+export interface GuestEmailHistoryEntry {
+  id: string;
+  recipientEmail: string;
+  subject: string;
+  company?: string;
+  position?: string;
+  senderMode: 'owner_guest_relay';
+  gmailMessageId?: string | null;
+  status: 'sent' | 'failed';
+  errorReason?: string | null;
+  timestamp: string;
+}
+
+export interface StoredGuestSessionRecord {
+  guestId: string;
+  clientFingerprint: string;
+  createdAt: number;
+  expiresAt: number;
+  durationSeconds: number;
+  status: 'active' | 'expired' | 'ended';
+  emailsSentCount: number;
+  aiRequestsCount: number;
+  lastActiveAt: number;
+  emailHistory: GuestEmailHistoryEntry[];
+}
+
+export interface GuestCooldownRecord {
+  guestId: string;
+  createdAt: number;
+  expiresAt: number;
+  cooldownUntil: number;
 }
 
 export interface MultiUserSaaSDatabaseSchema {
@@ -239,6 +323,7 @@ export interface MultiUserSaaSDatabaseSchema {
   userProfilesByUser: Record<string, MultiUserProfileRecord>;
   jobPreferencesByUser: Record<string, MultiUserJobPreferences>;
   gmailConnections: Record<string, StoredUserGmailConnection>;
+  geminiConfigsByUser: Record<string, StoredUserGeminiConfig>;
   cvsByUser: Record<string, MultiUserCVItem[]>;
   savedJobsByUser: Record<string, MultiUserSavedJobRecord[]>;
   applicationsByUser: Record<string, MultiUserJobApplication[]>;
@@ -246,6 +331,11 @@ export interface MultiUserSaaSDatabaseSchema {
   aiHistoryByUser: Record<string, MultiUserAIHistoryRecord[]>;
   notificationsByUser: Record<string, MultiUserNotificationRecord[]>;
   pendingOAuthStates: Record<string, PendingOAuthStateRecord>;
+  revokedSessionJtis: Record<string, number>;
+  passwordResetTokens: Record<string, PasswordResetTokenRecord>;
+  emailVerificationTokens: Record<string, EmailVerificationTokenRecord>;
+  guestSessions: Record<string, StoredGuestSessionRecord>;
+  guestCooldownsByFingerprint: Record<string, GuestCooldownRecord>;
   adminSettings: AdminAISettingsConfig;
   systemLogs: SystemAuditLogRecord[];
   systemStats: {
@@ -267,10 +357,21 @@ export interface AuthenticatedRequestUser {
   status: UserAccountStatus;
 }
 
+export interface AuthenticatedGuestSession {
+  guestId: string;
+  createdAt: number;
+  expiresAt: number;
+  remainingSeconds: number;
+}
+
 declare global {
   namespace Express {
     interface Request {
       authenticatedUser?: AuthenticatedRequestUser;
+      guestSession?: AuthenticatedGuestSession;
+      authTokenJti?: string;
+      authTokenExp?: number;
+      authTokenIat?: number;
     }
   }
 }
@@ -396,6 +497,9 @@ export function verifySessionToken(token: string): {
   userId: string;
   email: string;
   role: UserRole;
+  jti?: string;
+  iat?: number;
+  exp?: number;
 } | null {
   if (!token || !token.startsWith('zvk.')) return null;
   const parts = token.split('.');
@@ -419,10 +523,66 @@ export function verifySessionToken(token: string): {
       userId: String(parsed.sub),
       email: String(parsed.email).toLowerCase(),
       role: parsed.role === 'admin' ? 'admin' : 'user',
+      jti: parsed.jti ? String(parsed.jti) : undefined,
+      iat: typeof parsed.iat === 'number' ? parsed.iat : undefined,
+      exp: Number(parsed.exp),
     };
   } catch {
     return null;
   }
+}
+
+export function issueGuestSessionToken(params: { guestId: string; expiresAt: number }): string {
+  const payload = {
+    gid: params.guestId,
+    role: 'guest',
+    iat: Date.now(),
+    exp: params.expiresAt,
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', getDerivedEncryptionKey())
+    .update(`guest:${encodedPayload}`)
+    .digest('base64url');
+  return `gst.${encodedPayload}.${sig}`;
+}
+
+export function verifyGuestSessionToken(token: string): {
+  guestId: string;
+  exp: number;
+  expired: boolean;
+} | null {
+  if (!token || !token.startsWith('gst.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, encodedPayload, providedSig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', getDerivedEncryptionKey())
+    .update(`guest:${encodedPayload}`)
+    .digest('base64url');
+  const bufA = Buffer.from(providedSig);
+  const bufB = Buffer.from(expectedSig);
+  if (bufA.length !== bufB.length || !crypto.timingSafeEqual(bufA, bufB)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+    if (!parsed.gid || !parsed.exp) return null;
+    const exp = Number(parsed.exp);
+    return {
+      guestId: String(parsed.gid),
+      exp,
+      expired: Date.now() >= exp,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function maskApiKey(rawKey: string): string {
+  const clean = String(rawKey || '').trim();
+  if (clean.length <= 8) return '****';
+  return `${clean.slice(0, 4)}...${clean.slice(-4)}`;
 }
 
 const FIREBASE_CERTS_URL =
@@ -567,6 +727,7 @@ export class MultiUserSaaSStorage {
         },
       },
       gmailConnections: {},
+      geminiConfigsByUser: {},
       cvsByUser: {},
       savedJobsByUser: {},
       applicationsByUser: {},
@@ -574,6 +735,11 @@ export class MultiUserSaaSStorage {
       aiHistoryByUser: {},
       notificationsByUser: {},
       pendingOAuthStates: {},
+      revokedSessionJtis: {},
+      passwordResetTokens: {},
+      emailVerificationTokens: {},
+      guestSessions: {},
+      guestCooldownsByFingerprint: {},
       adminSettings: {
         geminiEnabled: true,
         openaiEnabled: true,
@@ -633,6 +799,7 @@ export class MultiUserSaaSStorage {
           userProfilesByUser: { ...init.userProfilesByUser, ...(parsed.userProfilesByUser || {}) },
           jobPreferencesByUser: { ...init.jobPreferencesByUser, ...(parsed.jobPreferencesByUser || {}) },
           gmailConnections: parsed.gmailConnections || {},
+          geminiConfigsByUser: parsed.geminiConfigsByUser || {},
           cvsByUser: parsed.cvsByUser || {},
           savedJobsByUser: parsed.savedJobsByUser || {},
           applicationsByUser: parsed.applicationsByUser || {},
@@ -640,6 +807,11 @@ export class MultiUserSaaSStorage {
           aiHistoryByUser: parsed.aiHistoryByUser || {},
           notificationsByUser: parsed.notificationsByUser || {},
           pendingOAuthStates: parsed.pendingOAuthStates || {},
+          revokedSessionJtis: parsed.revokedSessionJtis || {},
+          passwordResetTokens: parsed.passwordResetTokens || {},
+          emailVerificationTokens: parsed.emailVerificationTokens || {},
+          guestSessions: parsed.guestSessions || {},
+          guestCooldownsByFingerprint: parsed.guestCooldownsByFingerprint || {},
           adminSettings: { ...init.adminSettings, ...(parsed.adminSettings || {}) },
           systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs.slice(0, 200) : init.systemLogs,
           systemStats: { ...init.systemStats, ...(parsed.systemStats || {}) },
@@ -805,6 +977,11 @@ export function buildMimeEmailWithAttachment(params: {
     mimeType: string;
     base64Data: string;
   } | null;
+  attachments?: Array<{
+    filename: string;
+    mimeType: string;
+    base64Data: string;
+  }>;
 }): string {
   const boundary = `zenvik_mime_boundary_${crypto.randomBytes(12).toString('hex')}`;
   const cleanSubject = params.subject.replace(/[\r\n]+/g, ' ').trim();
@@ -822,18 +999,24 @@ export function buildMimeEmailWithAttachment(params: {
     'MIME-Version: 1.0',
   ];
 
-  if (!params.attachment || !params.attachment.base64Data) {
+  const allAttachments: Array<{ filename: string; mimeType: string; base64Data: string }> = [];
+  if (params.attachment && params.attachment.base64Data) {
+    allAttachments.push(params.attachment);
+  }
+  if (Array.isArray(params.attachments)) {
+    for (const att of params.attachments) {
+      if (att && att.base64Data) {
+        allAttachments.push(att);
+      }
+    }
+  }
+
+  if (allAttachments.length === 0) {
     lines.push('Content-Type: text/plain; charset="UTF-8"');
     lines.push('Content-Transfer-Encoding: 7bit');
     lines.push('');
     lines.push(params.bodyText);
   } else {
-    const cleanBase64 = params.attachment.base64Data
-      .replace(/^data:[^;]+;base64,/, '')
-      .replace(/\s+/g, '');
-    const wrappedBase64 = cleanBase64.match(/.{1,76}/g)?.join('\r\n') || cleanBase64;
-    const safeFilename = params.attachment.filename.replace(/["\r\n]/g, '_');
-
     lines.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
     lines.push('');
     lines.push(`--${boundary}`);
@@ -842,13 +1025,22 @@ export function buildMimeEmailWithAttachment(params: {
     lines.push('');
     lines.push(Buffer.from(params.bodyText, 'utf8').toString('base64'));
     lines.push('');
-    lines.push(`--${boundary}`);
-    lines.push(`Content-Type: ${params.attachment.mimeType || 'application/pdf'}; name="${safeFilename}"`);
-    lines.push('Content-Transfer-Encoding: base64');
-    lines.push(`Content-Disposition: attachment; filename="${safeFilename}"`);
-    lines.push('');
-    lines.push(wrappedBase64);
-    lines.push('');
+
+    for (const att of allAttachments) {
+      const cleanBase64 = att.base64Data
+        .replace(/^data:[^;]+;base64,/, '')
+        .replace(/\s+/g, '');
+      const wrappedBase64 = cleanBase64.match(/.{1,76}/g)?.join('\r\n') || cleanBase64;
+      const safeFilename = att.filename.replace(/["\r\n]/g, '_');
+
+      lines.push(`--${boundary}`);
+      lines.push(`Content-Type: ${att.mimeType || 'application/pdf'}; name="${safeFilename}"`);
+      lines.push('Content-Transfer-Encoding: base64');
+      lines.push(`Content-Disposition: attachment; filename="${safeFilename}"`);
+      lines.push('');
+      lines.push(wrappedBase64);
+      lines.push('');
+    }
     lines.push(`--${boundary}--`);
   }
 
@@ -885,16 +1077,61 @@ export interface GmailTransportOverrides {
     id: string;
     threadId: string;
   }>;
+  listGmailReplies?: (params: {
+    accessToken: string;
+    maxResults?: number;
+  }) => Promise<Array<{ id: string; threadId: string; from: string; subject: string; snippet: string; date: string }>>;
+  sendAuthEmail?: (params: {
+    toEmail: string;
+    type: 'password_reset' | 'email_verification';
+    token: string;
+    displayName: string;
+  }) => Promise<void>;
+  generateGeminiContent?: (params: {
+    apiKey: string;
+    model: string;
+    prompt: string;
+    systemInstruction?: string;
+  }) => Promise<{ text: string; model: string }>;
 }
 
 export function createMultiUserSaaSRouter(options?: {
   dbFilePath?: string;
   transport?: GmailTransportOverrides;
   verifyFirebaseToken?: (idToken: string) => Promise<{ uid: string; email: string; name?: string } | null>;
+  guestDurationMs?: number;
+  guestCooldownMs?: number;
+  guestGeminiApiKey?: string;
+  ownerGmailCredentials?: {
+    email: string;
+    accessToken?: string;
+    refreshToken?: string;
+  };
+  retryDelayMs?: number;
 }) {
   const storage = new MultiUserSaaSStorage(options?.dbFilePath);
   const router = express.Router();
   const firebaseTokenVerifier = options?.verifyFirebaseToken || verifyFirebaseIdToken;
+  const retryDelayMs = typeof options?.retryDelayMs === 'number' ? options.retryDelayMs : 150;
+
+  function getConfiguredGuestDurationMs(): number {
+    if (typeof options?.guestDurationMs === 'number' && options.guestDurationMs > 0) {
+      return options.guestDurationMs;
+    }
+    const envSeconds = Number(process.env.GUEST_SESSION_DURATION_SECONDS || DEFAULT_GUEST_DURATION_SECONDS);
+    const clampedSeconds = Number.isFinite(envSeconds)
+      ? Math.max(MIN_GUEST_DURATION_SECONDS, Math.min(MAX_GUEST_DURATION_SECONDS, Math.floor(envSeconds)))
+      : DEFAULT_GUEST_DURATION_SECONDS;
+    return clampedSeconds * 1000;
+  }
+
+  function getConfiguredGuestCooldownMs(): number {
+    if (typeof options?.guestCooldownMs === 'number' && options.guestCooldownMs >= 0) {
+      return options.guestCooldownMs;
+    }
+    const envSeconds = Number(process.env.GUEST_COOLDOWN_SECONDS || 1800);
+    return Number.isFinite(envSeconds) && envSeconds >= 0 ? envSeconds * 1000 : 1800 * 1000;
+  }
 
   function getOAuthCredentials(req?: Request) {
     const clientId = (process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || '').trim();
@@ -916,7 +1153,44 @@ export function createMultiUserSaaSRouter(options?: {
     };
   }
 
-  // Default production Google OAuth / Gmail HTTP calls + injectable test overrides
+  function isAllowedRedirectUri(uri: string, req?: Request): boolean {
+    try {
+      const parsed = new URL(uri);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+      const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+      if (parsed.protocol === 'http:' && !isLocal) return false;
+      const pathOk =
+        parsed.pathname === '/api/gmail/oauth/callback' ||
+        parsed.pathname === '/api/gmail/oauth/callback/' ||
+        parsed.pathname === '/auth/callback' ||
+        parsed.pathname === '/auth/callback/';
+      if (!pathOk) return false;
+
+      const allowedHosts = new Set<string>(['localhost', '127.0.0.1']);
+      const reqHost = req?.get('host')?.split(':')[0]?.toLowerCase();
+      if (reqHost) allowedHosts.add(reqHost);
+      for (const candidate of [process.env.APP_URL, process.env.GOOGLE_REDIRECT_URI, process.env.SHARED_APP_URL]) {
+        if (candidate && candidate !== 'MY_APP_URL') {
+          try {
+            allowedHosts.add(new URL(candidate).hostname.toLowerCase());
+          } catch {
+            // ignore malformed env
+          }
+        }
+      }
+      const hostLower = parsed.hostname.toLowerCase();
+      return allowedHosts.has(hostLower) || hostLower.endsWith('.run.app');
+    } catch {
+      return false;
+    }
+  }
+
+  function isAllowedAndroidDeepLink(uri?: string | null): boolean {
+    if (!uri) return false;
+    return uri.startsWith('zenvik://oauth/callback') || uri.startsWith('com.ccd.abetteryou://oauth/callback');
+  }
+
+  // Default production Google OAuth / Gmail / Gemini HTTP calls + injectable test overrides
   const transport: Required<GmailTransportOverrides> = {
     exchangeCodeForTokens:
       options?.transport?.exchangeCodeForTokens ||
@@ -1028,10 +1302,76 @@ export function createMultiUserSaaSRouter(options?: {
           threadId: String(data.threadId || data.id),
         };
       }),
+
+    listGmailReplies:
+      options?.transport?.listGmailReplies ||
+      (async ({ accessToken, maxResults = 10 }) => {
+        const listRes = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${Math.min(25, Math.max(1, maxResults))}&q=${encodeURIComponent('in:inbox (interview OR application OR position OR hiring OR recruitment)')}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (!listRes.ok) {
+          const data: any = await listRes.json().catch(() => ({}));
+          const err: any = new Error(data?.error?.message || `Failed to read Gmail replies (HTTP ${listRes.status})`);
+          err.httpStatus = listRes.status;
+          throw err;
+        }
+        const listData: any = await listRes.json().catch(() => ({}));
+        const ids: Array<{ id: string; threadId: string }> = Array.isArray(listData.messages) ? listData.messages.slice(0, maxResults) : [];
+        const results: Array<{ id: string; threadId: string; from: string; subject: string; snippet: string; date: string }> = [];
+        for (const msg of ids) {
+          const msgRes = await fetch(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msg.id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          );
+          if (!msgRes.ok) continue;
+          const mData: any = await msgRes.json().catch(() => ({}));
+          const headers: Array<{ name: string; value: string }> = mData?.payload?.headers || [];
+          const getH = (name: string) => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+          results.push({
+            id: String(mData.id || msg.id),
+            threadId: String(mData.threadId || msg.threadId),
+            from: getH('From'),
+            subject: getH('Subject'),
+            snippet: String(mData.snippet || ''),
+            date: getH('Date'),
+          });
+        }
+        return results;
+      }),
+
+    sendAuthEmail:
+      options?.transport?.sendAuthEmail ||
+      (async ({ toEmail, type }) => {
+        // Production hook: integrate SMTP / transactional email provider when configured; never log raw tokens.
+        storage.appendLog('info', `auth_email_${type}`, `Auth notification queued for ${toEmail}`);
+      }),
+
+    generateGeminiContent:
+      options?.transport?.generateGeminiContent ||
+      (async ({ apiKey, model, prompt, systemInstruction }) => {
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            },
+          },
+        });
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: systemInstruction ? { systemInstruction } : undefined,
+        });
+        return {
+          text: (response.text || '').trim(),
+          model,
+        };
+      }),
   };
 
   // ==========================================================================
-  // AUTHENTICATION & ISOLATION MIDDLEWARE
+  // AUTHENTICATION, GUEST MODE & ISOLATION MIDDLEWARE
   // ==========================================================================
 
   function extractTokenFromRequest(req: Request): string | null {
@@ -1043,7 +1383,74 @@ export function createMultiUserSaaSRouter(options?: {
     if (typeof customHeader === 'string' && customHeader.trim()) {
       return customHeader.trim();
     }
+    const guestHeader = req.headers['x-zenvik-guest-token'];
+    if (typeof guestHeader === 'string' && guestHeader.trim()) {
+      return guestHeader.trim();
+    }
     return null;
+  }
+
+  function pruneExpiredRevocations(state: MultiUserSaaSDatabaseSchema) {
+    const now = Date.now();
+    for (const [jti, exp] of Object.entries(state.revokedSessionJtis || {})) {
+      if (now > Number(exp)) {
+        delete state.revokedSessionJtis[jti];
+      }
+    }
+  }
+
+  function resolveGuestSessionFromToken(rawToken: string): {
+    ok: boolean;
+    session?: AuthenticatedGuestSession;
+    record?: StoredGuestSessionRecord;
+    errorCode?: string;
+    httpStatus?: number;
+    message?: string;
+  } {
+    const verified = verifyGuestSessionToken(rawToken);
+    if (!verified) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_GUEST_TOKEN',
+        httpStatus: 401,
+        message: 'Guest session token is invalid.',
+      };
+    }
+    const state = storage.getState();
+    const record = state.guestSessions[verified.guestId];
+    if (!record) {
+      return {
+        ok: false,
+        errorCode: 'GUEST_SESSION_NOT_FOUND',
+        httpStatus: 401,
+        message: 'Guest session does not exist. Please sign up or log in.',
+      };
+    }
+    const now = Date.now();
+    if (record.status === 'ended' || record.status === 'expired' || now >= record.expiresAt || verified.expired) {
+      if (record.status === 'active') {
+        record.status = 'expired';
+        storage.save();
+      }
+      return {
+        ok: false,
+        errorCode: 'GUEST_SESSION_EXPIRED',
+        httpStatus: 401,
+        message: 'Your temporary guest session has expired. Please sign up or log in to continue.',
+      };
+    }
+    record.lastActiveAt = now;
+    const remainingSeconds = Math.max(0, Math.ceil((record.expiresAt - now) / 1000));
+    return {
+      ok: true,
+      record,
+      session: {
+        guestId: record.guestId,
+        createdAt: record.createdAt,
+        expiresAt: record.expiresAt,
+        remainingSeconds,
+      },
+    };
   }
 
   async function requireAuthenticatedUser(req: Request, res: Response, next: NextFunction) {
@@ -1056,12 +1463,54 @@ export function createMultiUserSaaSRouter(options?: {
       });
     }
 
+    // Strictly block Guest tokens on private registered-user endpoints
+    if (rawToken.startsWith('gst.')) {
+      const guestCheck = resolveGuestSessionFromToken(rawToken);
+      if (!guestCheck.ok && guestCheck.errorCode === 'GUEST_SESSION_EXPIRED') {
+        return res.status(401).json({
+          error: 'GUEST_SESSION_EXPIRED',
+          requiresAuth: true,
+          message: guestCheck.message,
+        });
+      }
+      return res.status(403).json({
+        error: 'GUEST_ACCESS_RESTRICTED',
+        requiresAuth: true,
+        message: 'Guest sessions cannot access private user data, email history, credentials, or account settings. Please sign up or log in.',
+      });
+    }
+
+    const state = storage.getState();
+    pruneExpiredRevocations(state);
+
     // 1. Check ZENVIK signed session token
     const verifiedSession = verifySessionToken(rawToken);
     let userRecord: MultiUserAccountRecord | null = null;
 
     if (verifiedSession) {
+      if (verifiedSession.jti && state.revokedSessionJtis[verifiedSession.jti]) {
+        state.systemStats.totalAuthErrors += 1;
+        return res.status(401).json({
+          error: 'SESSION_REVOKED',
+          message: 'This session has been logged out. Please log in again.',
+        });
+      }
       userRecord = storage.findUserById(verifiedSession.userId);
+      if (
+        userRecord &&
+        userRecord.passwordChangedAt &&
+        verifiedSession.iat &&
+        verifiedSession.iat < userRecord.passwordChangedAt
+      ) {
+        state.systemStats.totalAuthErrors += 1;
+        return res.status(401).json({
+          error: 'SESSION_INVALIDATED',
+          message: 'Your password was changed. Please log in again with your new password.',
+        });
+      }
+      req.authTokenJti = verifiedSession.jti;
+      req.authTokenExp = verifiedSession.exp;
+      req.authTokenIat = verifiedSession.iat;
     } else {
       // 2. Cryptographically verify Firebase Auth RS256 ID Token JWT
       const firebaseClaims = await firebaseTokenVerifier(rawToken);
@@ -1075,7 +1524,7 @@ export function createMultiUserSaaSRouter(options?: {
     }
 
     if (!userRecord) {
-      storage.getState().systemStats.totalAuthErrors += 1;
+      state.systemStats.totalAuthErrors += 1;
       return res.status(401).json({
         error: 'INVALID_OR_EXPIRED_SESSION',
         message: 'Your session is invalid or has expired. Please log in again.',
@@ -1103,7 +1552,7 @@ export function createMultiUserSaaSRouter(options?: {
       (req.params && typeof req.params.userId === 'string' && req.params.userId.trim());
 
     if (suppliedUserId && suppliedUserId !== userRecord.userId) {
-      storage.getState().systemStats.totalAuthErrors += 1;
+      state.systemStats.totalAuthErrors += 1;
       return res.status(403).json({
         error: 'CROSS_USER_ACCESS_DENIED',
         message: 'Strict data isolation violation: You cannot access or act on behalf of another user ID.',
@@ -1118,6 +1567,23 @@ export function createMultiUserSaaSRouter(options?: {
       status: userRecord.status,
     };
     next();
+  }
+
+  async function requireAuthenticatedOrActiveGuest(req: Request, res: Response, next: NextFunction) {
+    const rawToken = extractTokenFromRequest(req);
+    if (rawToken && rawToken.startsWith('gst.')) {
+      const guestCheck = resolveGuestSessionFromToken(rawToken);
+      if (!guestCheck.ok || !guestCheck.session) {
+        return res.status(guestCheck.httpStatus || 401).json({
+          error: guestCheck.errorCode || 'GUEST_SESSION_EXPIRED',
+          requiresAuth: true,
+          message: guestCheck.message || 'Your guest session has expired. Please sign up or log in.',
+        });
+      }
+      req.guestSession = guestCheck.session;
+      return next();
+    }
+    return requireAuthenticatedUser(req, res, next);
   }
 
   function requireAdminUser(req: Request, res: Response, next: NextFunction) {
@@ -1311,9 +1777,409 @@ export function createMultiUserSaaSRouter(options?: {
         displayName: user.displayName,
         role: user.role,
         status: user.status,
+        emailVerified: Boolean(user.emailVerified ?? true),
         createdAt: user.createdAt,
       },
     });
+  });
+
+  // Unified Google Sign-In endpoint (exchanges verified Firebase/Google RS256 ID token for authoritative zvk.* session)
+  router.post('/multiuser/auth/google-signin', async (req: Request, res: Response) => {
+    const rawToken = extractTokenFromRequest(req) || String(req.body?.idToken || '').trim();
+    if (!rawToken) {
+      return res.status(401).json({
+        error: 'INVALID_GOOGLE_TOKEN',
+        message: 'A verified Google/Firebase ID token is required.',
+      });
+    }
+    const claims = await firebaseTokenVerifier(rawToken);
+    if (!claims || !claims.uid || !claims.email || !claims.email.includes('@')) {
+      storage.getState().systemStats.totalAuthErrors += 1;
+      storage.save();
+      return res.status(401).json({
+        error: 'INVALID_GOOGLE_TOKEN',
+        message: 'Google sign-in token verification failed.',
+      });
+    }
+    const user = storage.upsertFirebaseUser({
+      uid: claims.uid,
+      email: claims.email.trim().toLowerCase(),
+      displayName: claims.name || String(req.body?.displayName || '').trim() || claims.email.split('@')[0],
+    });
+    if (user.status === 'suspended') {
+      return res.status(403).json({
+        error: 'ACCOUNT_SUSPENDED',
+        message: 'Your account is currently suspended.',
+      });
+    }
+    user.emailVerified = true;
+    user.emailVerifiedAt = user.emailVerifiedAt || new Date().toISOString();
+    storage.save();
+    const sessionToken = issueSessionToken({
+      userId: user.userId,
+      email: user.email,
+      role: user.role,
+    });
+    return res.json({
+      success: true,
+      sessionToken,
+      user: {
+        userId: user.userId,
+        email: user.email,
+        displayName: user.displayName,
+        role: user.role,
+        status: user.status,
+        emailVerified: true,
+        createdAt: user.createdAt,
+      },
+    });
+  });
+
+  // Logout: cryptographically revoke current session JTI on the server so the token cannot be reused
+  router.post('/multiuser/auth/logout', requireAuthenticatedUser, (req: Request, res: Response) => {
+    const state = storage.getState();
+    pruneExpiredRevocations(state);
+    if (req.authTokenJti) {
+      state.revokedSessionJtis[req.authTokenJti] = req.authTokenExp || Date.now() + 7 * 24 * 60 * 60 * 1000;
+      storage.appendLog('info', 'auth_logout', `User logged out and session token revoked`, req.authenticatedUser?.userId);
+      storage.save();
+    }
+    return res.json({
+      success: true,
+      message: 'You have been securely logged out and your session token has been revoked.',
+    });
+  });
+
+  // Forgot Password: generates timed single-use hashed token and triggers auth email transport
+  router.post('/multiuser/auth/forgot-password', async (req: Request, res: Response) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'INVALID_EMAIL', message: 'Please enter a valid email address.' });
+    }
+    const user = storage.findUserByEmail(email);
+    if (user && user.status === 'active') {
+      const rawResetToken = crypto.randomBytes(24).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(rawResetToken).digest('hex');
+      const now = Date.now();
+      const state = storage.getState();
+      state.passwordResetTokens[tokenHash] = {
+        tokenHash,
+        userId: user.userId,
+        email: user.email,
+        createdAt: now,
+        expiresAt: now + 15 * 60 * 1000,
+        used: false,
+      };
+      storage.appendLog('security', 'password_reset_requested', `Password reset requested for ${user.email}`, user.userId);
+      storage.save();
+      try {
+        await transport.sendAuthEmail({
+          toEmail: user.email,
+          type: 'password_reset',
+          token: rawResetToken,
+          displayName: user.displayName,
+        });
+      } catch {
+        // Non-fatal transport failure; token remains stored
+      }
+    }
+    // Always return uniform response to prevent user enumeration
+    return res.json({
+      success: true,
+      message: 'If an account exists for that email address, a password reset link/token has been issued.',
+    });
+  });
+
+  // Reset Password: validates single-use hashed token, updates password, invalidates prior sessions
+  router.post('/multiuser/auth/reset-password', (req: Request, res: Response) => {
+    const token = String(req.body?.token || '').trim();
+    const newPassword = String(req.body?.newPassword || '');
+    if (!token) {
+      return res.status(400).json({ error: 'RESET_TOKEN_REQUIRED', message: 'Password reset token is required.' });
+    }
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({
+        error: 'WEAK_PASSWORD',
+        message: 'New password must be at least 6 characters long.',
+      });
+    }
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const state = storage.getState();
+    const record = state.passwordResetTokens[tokenHash];
+    if (!record || record.used || Date.now() > record.expiresAt) {
+      return res.status(400).json({
+        error: 'INVALID_OR_EXPIRED_RESET_TOKEN',
+        message: 'This password reset token is invalid or has expired. Please request a new one.',
+      });
+    }
+    const user = storage.findUserById(record.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'Account no longer exists.' });
+    }
+    const { hash, salt } = hashPassword(newPassword);
+    user.passwordHash = hash;
+    user.passwordSalt = salt;
+    user.passwordChangedAt = Date.now();
+    user.updatedAt = new Date().toISOString();
+    record.used = true;
+    storage.appendLog('security', 'password_reset_completed', `Password reset completed for ${user.email}`, user.userId);
+    storage.save();
+
+    return res.json({
+      success: true,
+      message: 'Your password has been updated. Please log in with your new password.',
+    });
+  });
+
+  // Email Verification: request verification token & verify token
+  router.post('/multiuser/auth/resend-verification', requireAuthenticatedUser, async (req: Request, res: Response) => {
+    const userId = req.authenticatedUser!.userId;
+    const user = storage.findUserById(userId);
+    if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' });
+    if (user.emailVerified) {
+      return res.json({ success: true, alreadyVerified: true, message: 'Email is already verified.' });
+    }
+    const rawToken = crypto.randomBytes(24).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const now = Date.now();
+    const state = storage.getState();
+    state.emailVerificationTokens[tokenHash] = {
+      tokenHash,
+      userId: user.userId,
+      email: user.email,
+      createdAt: now,
+      expiresAt: now + 24 * 60 * 60 * 1000,
+      used: false,
+    };
+    storage.save();
+    try {
+      await transport.sendAuthEmail({
+        toEmail: user.email,
+        type: 'email_verification',
+        token: rawToken,
+        displayName: user.displayName,
+      });
+    } catch {
+      // Non-fatal
+    }
+    return res.json({
+      success: true,
+      message: 'A verification link has been sent to your email address.',
+    });
+  });
+
+  router.post('/multiuser/auth/verify-email', (req: Request, res: Response) => {
+    const token = String(req.body?.token || '').trim();
+    if (!token) {
+      return res.status(400).json({ error: 'VERIFICATION_TOKEN_REQUIRED', message: 'Verification token is required.' });
+    }
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const state = storage.getState();
+    const record = state.emailVerificationTokens[tokenHash];
+    if (!record || record.used || Date.now() > record.expiresAt) {
+      return res.status(400).json({
+        error: 'INVALID_OR_EXPIRED_VERIFICATION_TOKEN',
+        message: 'Verification token is invalid or expired.',
+      });
+    }
+    const user = storage.findUserById(record.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'Account not found.' });
+    }
+    record.used = true;
+    user.emailVerified = true;
+    user.emailVerifiedAt = new Date().toISOString();
+    user.updatedAt = user.emailVerifiedAt;
+    storage.save();
+    return res.json({
+      success: true,
+      emailVerified: true,
+      message: 'Your email address has been verified.',
+    });
+  });
+
+  // ==========================================================================
+  // 1B. SERVER-ENFORCED CONTROLLED GUEST MODE (2–4 MIN, DEFAULT 3 MIN)
+  // ==========================================================================
+
+  function computeGuestClientFingerprint(req: Request): string {
+    const clientIp = (req.ip || req.socket?.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+    const clientHint = String(req.headers['x-guest-client-id'] || req.body?.clientId || '').trim();
+    const userAgent = String(req.headers['user-agent'] || '').slice(0, 120);
+    const material = clientHint ? `${clientIp}:${clientHint}` : `${clientIp}:${userAgent}`;
+    return crypto.createHash('sha256').update(material).digest('hex').slice(0, 32);
+  }
+
+  function hasOwnerGmailConfigured(): boolean {
+    if (options?.ownerGmailCredentials?.email && (options.ownerGmailCredentials.accessToken || options.ownerGmailCredentials.refreshToken)) {
+      return true;
+    }
+    if (process.env.OWNER_GMAIL_REFRESH_TOKEN?.trim() || process.env.OWNER_GMAIL_ACCESS_TOKEN?.trim()) {
+      return true;
+    }
+    const state = storage.getState();
+    const ownerConn = state.gmailConnections['usr_owner_fazle_rabbi'];
+    return Boolean(ownerConn && ownerConn.status === 'connected' && (ownerConn.encryptedAccessToken || ownerConn.encryptedRefreshToken));
+  }
+
+  function hasOwnerGeminiConfigured(): boolean {
+    const key = (options?.guestGeminiApiKey || process.env.GEMINI_API_KEY || '').trim();
+    return Boolean(key && key.length > 5 && key !== 'undefined' && key !== 'null');
+  }
+
+  router.post('/multiuser/guest/start', (req: Request, res: Response) => {
+    const state = storage.getState();
+    const now = Date.now();
+    const fingerprint = computeGuestClientFingerprint(req);
+    const existingCooldown = state.guestCooldownsByFingerprint[fingerprint];
+
+    // Prevent refresh / clock-tampering / re-request from resetting an active or expired guest timer
+    if (existingCooldown) {
+      const existingSession = state.guestSessions[existingCooldown.guestId];
+      if (existingSession && existingSession.status === 'active' && now < existingSession.expiresAt) {
+        const remainingSeconds = Math.max(0, Math.ceil((existingSession.expiresAt - now) / 1000));
+        const guestToken = issueGuestSessionToken({
+          guestId: existingSession.guestId,
+          expiresAt: existingSession.expiresAt,
+        });
+        return res.json({
+          success: true,
+          resumed: true,
+          guestToken,
+          guestSession: {
+            guestId: existingSession.guestId,
+            status: 'active',
+            createdAt: existingSession.createdAt,
+            expiresAt: existingSession.expiresAt,
+            durationSeconds: existingSession.durationSeconds,
+            remainingSeconds,
+            emailsSentCount: existingSession.emailsSentCount,
+            maxEmailsAllowed: MAX_GUEST_EMAILS_PER_SESSION,
+            aiRequestsCount: existingSession.aiRequestsCount,
+          },
+          ownerGmailConfigured: hasOwnerGmailConfigured(),
+          ownerGeminiConfigured: hasOwnerGeminiConfigured(),
+          disclosure:
+            'Guest Mode is a temporary preview session. AI requests use the platform server key, and any email you confirm sending will be sent via the platform owner account. Guest sessions cannot access private user data or inbox history.',
+        });
+      }
+
+      if (now < existingCooldown.cooldownUntil) {
+        if (existingSession && existingSession.status === 'active') {
+          existingSession.status = 'expired';
+          storage.save();
+        }
+        return res.status(403).json({
+          error: 'GUEST_SESSION_EXPIRED',
+          requiresAuth: true,
+          message: 'Your temporary guest preview has expired. Please create a free account or log in to continue.',
+        });
+      }
+    }
+
+    const durationMs = getConfiguredGuestDurationMs();
+    const durationSeconds = Math.max(1, Math.round(durationMs / 1000));
+    const cooldownMs = getConfiguredGuestCooldownMs();
+    const guestId = `gst_${crypto.randomBytes(10).toString('hex')}`;
+    const expiresAt = now + durationMs;
+
+    const sessionRecord: StoredGuestSessionRecord = {
+      guestId,
+      clientFingerprint: fingerprint,
+      createdAt: now,
+      expiresAt,
+      durationSeconds,
+      status: 'active',
+      emailsSentCount: 0,
+      aiRequestsCount: 0,
+      lastActiveAt: now,
+      emailHistory: [],
+    };
+
+    state.guestSessions[guestId] = sessionRecord;
+    state.guestCooldownsByFingerprint[fingerprint] = {
+      guestId,
+      createdAt: now,
+      expiresAt,
+      cooldownUntil: expiresAt + cooldownMs,
+    };
+    storage.appendLog('info', 'guest_session_started', `Guest preview session ${guestId} started (${durationSeconds}s)`);
+    storage.save();
+
+    const guestToken = issueGuestSessionToken({ guestId, expiresAt });
+    return res.status(201).json({
+      success: true,
+      resumed: false,
+      guestToken,
+      guestSession: {
+        guestId,
+        status: 'active',
+        createdAt: now,
+        expiresAt,
+        durationSeconds,
+        remainingSeconds: durationSeconds,
+        emailsSentCount: 0,
+        maxEmailsAllowed: MAX_GUEST_EMAILS_PER_SESSION,
+        aiRequestsCount: 0,
+      },
+      ownerGmailConfigured: hasOwnerGmailConfigured(),
+      ownerGeminiConfigured: hasOwnerGeminiConfigured(),
+      disclosure:
+        'Guest Mode is a temporary preview session. AI requests use the platform server key, and any email you confirm sending will be sent via the platform owner account. Guest sessions cannot access private user data or inbox history.',
+    });
+  });
+
+  router.get('/multiuser/guest/status', (req: Request, res: Response) => {
+    const rawToken = extractTokenFromRequest(req);
+    if (!rawToken || !rawToken.startsWith('gst.')) {
+      return res.status(401).json({
+        error: 'GUEST_TOKEN_REQUIRED',
+        expired: true,
+        requiresAuth: true,
+        remainingSeconds: 0,
+        message: 'No active guest session token provided.',
+      });
+    }
+    const check = resolveGuestSessionFromToken(rawToken);
+    if (!check.ok || !check.session || !check.record) {
+      return res.status(401).json({
+        error: check.errorCode || 'GUEST_SESSION_EXPIRED',
+        expired: true,
+        requiresAuth: true,
+        remainingSeconds: 0,
+        message: check.message || 'Guest session has expired. Please sign up or log in.',
+      });
+    }
+    return res.json({
+      active: true,
+      expired: false,
+      guestId: check.session.guestId,
+      createdAt: check.session.createdAt,
+      expiresAt: check.session.expiresAt,
+      durationSeconds: check.record.durationSeconds,
+      remainingSeconds: check.session.remainingSeconds,
+      emailsSentCount: check.record.emailsSentCount,
+      maxEmailsAllowed: MAX_GUEST_EMAILS_PER_SESSION,
+      aiRequestsCount: check.record.aiRequestsCount,
+      ownerGmailConfigured: hasOwnerGmailConfigured(),
+      ownerGeminiConfigured: hasOwnerGeminiConfigured(),
+    });
+  });
+
+  router.post('/multiuser/guest/end', (req: Request, res: Response) => {
+    const rawToken = extractTokenFromRequest(req);
+    if (rawToken && rawToken.startsWith('gst.')) {
+      const verified = verifyGuestSessionToken(rawToken);
+      if (verified) {
+        const state = storage.getState();
+        const record = state.guestSessions[verified.guestId];
+        if (record) {
+          record.status = 'ended';
+          storage.save();
+        }
+      }
+    }
+    return res.json({ success: true, message: 'Guest session ended.' });
   });
 
   // Get current authenticated user's isolated profile, CVs, applications, email history, and Gmail connection summary
@@ -1575,6 +2441,7 @@ export function createMultiUserSaaSRouter(options?: {
       hasClientSecret: Boolean(creds.clientSecret),
       redirectUri: creds.redirectUri,
       requiredScope: GMAIL_SEND_ONLY_SCOPE,
+      optionalReplyScope: GMAIL_READONLY_SCOPE,
       requiredEnvVars: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI', 'TOKEN_ENCRYPTION_KEY'],
     });
   });
@@ -1582,7 +2449,8 @@ export function createMultiUserSaaSRouter(options?: {
   /**
    * Step 1 of Authorization Code Flow:
    * Authenticated user requests the Google OAuth 2.0 consent screen URL.
-   * Requests ONLY `https://www.googleapis.com/auth/gmail.send` (+ userinfo.email to identify the connected Gmail).
+   * Requests ONLY minimum scopes: `gmail.send` (+ `userinfo.email` to verify connected Gmail),
+   * and optionally `gmail.readonly` ONLY when explicitly requested for reply tracking.
    */
   router.post('/gmail/oauth/start', requireAuthenticatedUser, (req: Request, res: Response) => {
     const userId = req.authenticatedUser!.userId;
@@ -1602,6 +2470,22 @@ export function createMultiUserSaaSRouter(options?: {
         ? req.body.redirectUri.trim()
         : creds.redirectUri;
 
+    if (!isAllowedRedirectUri(customRedirectUri, req)) {
+      return res.status(400).json({
+        error: 'INVALID_REDIRECT_URI',
+        message: 'The requested OAuth redirect URI is not in the trusted callback allowlist.',
+      });
+    }
+
+    const includeReadReplies = req.body?.includeReadReplies === true;
+    const requestedScopes = includeReadReplies
+      ? [GMAIL_SEND_ONLY_SCOPE, GMAIL_READONLY_SCOPE]
+      : [GMAIL_SEND_ONLY_SCOPE];
+    const oauthScopeString = [...requestedScopes, OAUTH_EMAIL_IDENTITY_SCOPE].join(' ');
+    const platform: 'web' | 'android' = req.body?.platform === 'android' ? 'android' : 'web';
+    const rawDeepLink = typeof req.body?.appDeepLink === 'string' ? req.body.appDeepLink.trim() : null;
+    const appDeepLink = platform === 'android' && isAllowedAndroidDeepLink(rawDeepLink) ? rawDeepLink : null;
+
     const stateNonce = crypto.randomBytes(24).toString('hex');
     const stateHmac = crypto
       .createHmac('sha256', getDerivedEncryptionKey())
@@ -1614,6 +2498,9 @@ export function createMultiUserSaaSRouter(options?: {
       stateId: stateToken,
       userId,
       redirectUri: customRedirectUri,
+      requestedScopes,
+      platform,
+      appDeepLink,
       createdAt: Date.now(),
       expiresAt: Date.now() + 10 * 60 * 1000,
       used: false,
@@ -1624,7 +2511,7 @@ export function createMultiUserSaaSRouter(options?: {
       client_id: creds.clientId,
       redirect_uri: customRedirectUri,
       response_type: 'code',
-      scope: `${GMAIL_SEND_ONLY_SCOPE} ${OAUTH_EMAIL_IDENTITY_SCOPE}`,
+      scope: oauthScopeString,
       access_type: 'offline',
       prompt: 'consent select_account',
       include_granted_scopes: 'false',
@@ -1635,10 +2522,83 @@ export function createMultiUserSaaSRouter(options?: {
     return res.json({
       authorizationUrl,
       state: stateToken,
-      requestedScopes: [GMAIL_SEND_ONLY_SCOPE],
+      requestedScopes,
       redirectUri: customRedirectUri,
+      platform,
     });
   });
+
+  function sendOAuthCallbackHtmlResponse(
+    res: Response,
+    params: {
+      ok: boolean;
+      gmailAddress?: string;
+      scopes?: string[];
+      errorCode?: string;
+      errorMessage?: string;
+      platform?: 'web' | 'android';
+      appDeepLink?: string | null;
+    }
+  ) {
+    const title = params.ok ? 'Gmail Connected — ZENVIK-AGENT' : 'Gmail Connection Cancelled — ZENVIK-AGENT';
+    const heading = params.ok ? 'Gmail Connected' : 'Gmail Connection Not Completed';
+    const headingColor = params.ok ? '#10B981' : '#F43F5E';
+    const detailHtml = params.ok
+      ? `Authorized sender: <strong style="color:#fff;">${escapeHtml(params.gmailAddress || '')}</strong>`
+      : escapeHtml(params.errorMessage || 'Authorization was declined or failed.');
+
+    let androidRedirectUrl: string | null = null;
+    if (params.platform === 'android' || params.appDeepLink) {
+      const baseDeepLink = params.appDeepLink || 'com.ccd.abetteryou://oauth/callback';
+      const qs = new URLSearchParams(
+        params.ok
+          ? { status: 'success', gmailAddress: params.gmailAddress || '' }
+          : { status: 'error', error: params.errorCode || 'OAUTH_FAILED', message: params.errorMessage || '' }
+      );
+      androidRedirectUrl = `${baseDeepLink}?${qs.toString()}`;
+    }
+
+    const postMessagePayload = params.ok
+      ? {
+          type: 'ZENVIK_GMAIL_OAUTH_SUCCESS',
+          gmailAddress: params.gmailAddress || '',
+          scopes: params.scopes || [GMAIL_SEND_ONLY_SCOPE],
+        }
+      : {
+          type: 'ZENVIK_GMAIL_OAUTH_ERROR',
+          error: params.errorCode || 'OAUTH_FAILED',
+          message: params.errorMessage || 'Gmail connection failed.',
+        };
+
+    return res.status(params.ok ? 200 : 400).send(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>
+<body style="background:#0B0C10;color:#F8FAFC;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;">
+  <div style="background:#141822;border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:28px;max-width:420px;width:100%;text-align:center;">
+    <h2 style="color:${headingColor};margin:0 0 8px;">${heading}</h2>
+    <p style="font-size:14px;color:#94A3B8;margin:0 0 16px;">${detailHtml}</p>
+    ${
+      androidRedirectUrl
+        ? `<a href="${escapeHtml(androidRedirectUrl)}" style="display:inline-block;padding:10px 18px;border-radius:12px;background:#2563EB;color:#fff;font-weight:700;font-size:13px;text-decoration:none;margin-bottom:10px;">Return to ZENVIK App</a>`
+        : ''
+    }
+    <p style="font-size:12px;color:#64748B;margin:0;">You may close this window if it does not close automatically.</p>
+  </div>
+  <script>
+    (function() {
+      var payload = ${JSON.stringify(postMessagePayload)};
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(payload, '*');
+          setTimeout(function() { window.close(); }, 600);
+        }
+      } catch (e) {}
+      ${androidRedirectUrl ? `setTimeout(function() { window.location.href = ${JSON.stringify(androidRedirectUrl)}; }, 250);` : ''}
+    })();
+  </script>
+</body>
+</html>`);
+  }
 
   /**
    * Step 2 of Authorization Code Flow:
@@ -1650,39 +2610,68 @@ export function createMultiUserSaaSRouter(options?: {
     const code = String(req.query?.code || '').trim();
     const stateToken = String(req.query?.state || '').trim();
     const oauthError = String(req.query?.error || '').trim();
+    const wantsHtml = Boolean(req.accepts('html') && !req.xhr && req.query?.format !== 'json' && !String(req.headers.accept || '').includes('application/json'));
+    const state = storage.getState();
+    const pendingForError = stateToken ? state.pendingOAuthStates[stateToken] : undefined;
 
     if (oauthError) {
+      if (pendingForError) {
+        pendingForError.used = true;
+        storage.appendLog('warn', 'oauth_consent_denied', `User declined Gmail OAuth consent (${oauthError})`, pendingForError.userId);
+        storage.save();
+      }
+      const errMsg = `Google OAuth authorization was declined: ${oauthError}`;
+      if (wantsHtml) {
+        return sendOAuthCallbackHtmlResponse(res, {
+          ok: false,
+          errorCode: 'OAUTH_CONSENT_DENIED',
+          errorMessage: errMsg,
+          platform: pendingForError?.platform,
+          appDeepLink: pendingForError?.appDeepLink,
+        });
+      }
       return res.status(400).json({
         error: 'OAUTH_CONSENT_DENIED',
-        message: `Google OAuth authorization was declined: ${oauthError}`,
+        message: errMsg,
       });
     }
 
     if (!code || !stateToken) {
+      const errMsg = 'Missing authorization code or CSRF state token.';
+      if (wantsHtml) {
+        return sendOAuthCallbackHtmlResponse(res, { ok: false, errorCode: 'INVALID_OAUTH_CALLBACK', errorMessage: errMsg });
+      }
       return res.status(400).json({
         error: 'INVALID_OAUTH_CALLBACK',
-        message: 'Missing authorization code or CSRF state token.',
+        message: errMsg,
       });
     }
 
-    const state = storage.getState();
     const pending = state.pendingOAuthStates[stateToken];
     if (!pending || pending.used || Date.now() > pending.expiresAt) {
       state.systemStats.totalAuthErrors += 1;
       storage.save();
+      const errMsg = 'OAuth CSRF state validation failed or expired. Please try connecting Gmail again.';
+      if (wantsHtml) {
+        return sendOAuthCallbackHtmlResponse(res, { ok: false, errorCode: 'INVALID_OR_EXPIRED_OAUTH_STATE', errorMessage: errMsg });
+      }
       return res.status(400).json({
         error: 'INVALID_OR_EXPIRED_OAUTH_STATE',
-        message: 'OAuth CSRF state validation failed or expired. Please try connecting Gmail again.',
+        message: errMsg,
       });
     }
 
-    // Verify HMAC signature of stateToken against pending.userId
+    // Verify HMAC signature of stateToken against pending.userId using timing-safe comparison
     const [nonce, providedHmac] = stateToken.split('.');
     const expectedHmac = crypto
       .createHmac('sha256', getDerivedEncryptionKey())
       .update(`${nonce}:${pending.userId}`)
       .digest('hex');
-    if (providedHmac !== expectedHmac) {
+    const hmacValid =
+      Boolean(providedHmac) &&
+      providedHmac.length === expectedHmac.length &&
+      crypto.timingSafeEqual(Buffer.from(providedHmac, 'utf8'), Buffer.from(expectedHmac, 'utf8'));
+    if (!hmacValid) {
       return res.status(400).json({
         error: 'CSRF_STATE_SIGNATURE_MISMATCH',
         message: 'OAuth state signature verification failed.',
@@ -1721,6 +2710,16 @@ export function createMultiUserSaaSRouter(options?: {
       const existingConn = state.gmailConnections[userId];
       const userRecord = state.users[userId];
 
+      const grantedScopesRaw = typeof tokenResponse.scope === 'string' && tokenResponse.scope.trim()
+        ? tokenResponse.scope.split(/\s+/).filter(Boolean)
+        : pending.requestedScopes || [GMAIL_SEND_ONLY_SCOPE];
+      const grantedScopes = grantedScopesRaw.filter(
+        s => s === GMAIL_SEND_ONLY_SCOPE || s === GMAIL_READONLY_SCOPE
+      );
+      if (grantedScopes.length === 0) {
+        grantedScopes.push(GMAIL_SEND_ONLY_SCOPE);
+      }
+
       const encryptedAccess = encryptTokenAtRest(tokenResponse.access_token);
       const encryptedRefresh = tokenResponse.refresh_token
         ? encryptTokenAtRest(tokenResponse.refresh_token)
@@ -1729,7 +2728,7 @@ export function createMultiUserSaaSRouter(options?: {
       state.gmailConnections[userId] = {
         userId,
         gmailAddress,
-        scopes: [GMAIL_SEND_ONLY_SCOPE],
+        scopes: grantedScopes,
         encryptedAccessToken: encryptedAccess,
         encryptedRefreshToken: encryptedRefresh,
         accessTokenExpiresAt: Date.now() + Number(tokenResponse.expires_in || 3600) * 1000,
@@ -1742,27 +2741,17 @@ export function createMultiUserSaaSRouter(options?: {
         dailyLimit: userRecord?.dailySendLimit || 40,
       };
       state.systemStats.totalOAuthConnections += 1;
+      storage.appendLog('info', 'gmail_oauth_connected', `User connected personal Gmail (${gmailAddress})`, userId);
       storage.save();
 
-      if (req.accepts('html') && !req.xhr && req.query?.format !== 'json') {
-        const safeEmailHtml = escapeHtml(gmailAddress);
-        return res.status(200).send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>Gmail Connected — ZENVIK-AGENT</title></head>
-<body style="background:#0B0C10;color:#F8FAFC;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;">
-  <div style="background:#141822;border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:28px;max-width:420px;text-align:center;">
-    <h2 style="color:#10B981;margin:0 0 8px;">Gmail Connected</h2>
-    <p style="font-size:14px;color:#94A3B8;margin:0 0 16px;">Authorized sender: <strong style="color:#fff;">${safeEmailHtml}</strong></p>
-    <p style="font-size:12px;color:#64748B;">This window will close automatically.</p>
-  </div>
-  <script>
-    if (window.opener) {
-      window.opener.postMessage({ type: 'ZENVIK_GMAIL_OAUTH_SUCCESS', gmailAddress: ${JSON.stringify(gmailAddress)} }, window.location.origin);
-      setTimeout(() => window.close(), 600);
-    }
-  </script>
-</body>
-</html>`);
+      if (wantsHtml) {
+        return sendOAuthCallbackHtmlResponse(res, {
+          ok: true,
+          gmailAddress,
+          scopes: grantedScopes,
+          platform: pending.platform,
+          appDeepLink: pending.appDeepLink,
+        });
       }
 
       return res.json({
@@ -1770,14 +2759,25 @@ export function createMultiUserSaaSRouter(options?: {
         userId,
         connected: true,
         gmailAddress,
-        scopes: [GMAIL_SEND_ONLY_SCOPE],
+        scopes: grantedScopes,
+        hasRefreshToken: Boolean(encryptedRefresh),
         status: 'connected',
       });
     } catch (err: any) {
       storage.save();
+      const errMsg = err?.message || 'Failed to exchange authorization code with Google OAuth.';
+      if (wantsHtml) {
+        return sendOAuthCallbackHtmlResponse(res, {
+          ok: false,
+          errorCode: 'OAUTH_CODE_EXCHANGE_FAILED',
+          errorMessage: errMsg,
+          platform: pending.platform,
+          appDeepLink: pending.appDeepLink,
+        });
+      }
       return res.status(400).json({
         error: 'OAUTH_CODE_EXCHANGE_FAILED',
-        message: err?.message || 'Failed to exchange authorization code with Google OAuth.',
+        message: errMsg,
       });
     }
   }
@@ -1786,6 +2786,7 @@ export function createMultiUserSaaSRouter(options?: {
 
   /**
    * Bind a verified user's personal client-side OAuth token (strictly encrypted at rest and scoped to req.authenticatedUser.userId).
+   * Always cryptographically verifies the token's email with Google userinfo/tokeninfo — never trusts client-claimed email alone.
    */
   router.post('/gmail/oauth/connect-token', requireAuthenticatedUser, async (req: Request, res: Response) => {
     const userId = req.authenticatedUser!.userId;
@@ -1800,14 +2801,21 @@ export function createMultiUserSaaSRouter(options?: {
     }
 
     try {
-      const gmailAddress = (
+      // Always verify actual token owner against Google userinfo/tokeninfo
+      const verifiedGoogleEmail = (await transport.fetchGoogleUserEmail(accessToken)).trim().toLowerCase();
+      const claimedEmail =
         typeof req.body?.gmailAddress === 'string' && req.body.gmailAddress.includes('@')
-          ? req.body.gmailAddress
-          : await transport.fetchGoogleUserEmail(accessToken)
-      )
-        .trim()
-        .toLowerCase();
+          ? req.body.gmailAddress.trim().toLowerCase()
+          : null;
 
+      if (claimedEmail && claimedEmail !== verifiedGoogleEmail) {
+        return res.status(403).json({
+          error: 'OAUTH_EMAIL_MISMATCH',
+          message: 'Provided email address does not match the verified Google OAuth token owner.',
+        });
+      }
+
+      const gmailAddress = verifiedGoogleEmail;
       const now = new Date().toISOString();
       const today = now.slice(0, 10);
       const state = storage.getState();
@@ -1861,6 +2869,7 @@ export function createMultiUserSaaSRouter(options?: {
         connected: false,
         gmailAddress: null,
         scopes: [],
+        hasRefreshToken: false,
         status: 'disconnected',
         sentTodayCount: 0,
         dailyLimit: user?.dailySendLimit || 40,
@@ -1874,6 +2883,7 @@ export function createMultiUserSaaSRouter(options?: {
       connected: conn.status === 'connected',
       gmailAddress: conn.gmailAddress,
       scopes: conn.scopes,
+      hasRefreshToken: Boolean(conn.encryptedRefreshToken),
       status: conn.status,
       connectedAt: conn.connectedAt,
       updatedAt: conn.updatedAt,
@@ -1897,6 +2907,7 @@ export function createMultiUserSaaSRouter(options?: {
         await transport.revokeToken(accessToken);
       }
       delete state.gmailConnections[userId];
+      storage.appendLog('info', 'gmail_oauth_disconnected', `User disconnected personal Gmail`, userId);
       storage.save();
     }
 
@@ -1907,6 +2918,40 @@ export function createMultiUserSaaSRouter(options?: {
       status: 'disconnected',
       message: 'Your Gmail account has been disconnected and stored OAuth tokens have been revoked and deleted.',
     });
+  });
+
+  // Read Employer Replies (Authenticated registered user ONLY, requires explicit gmail.readonly scope)
+  router.get('/gmail/replies', requireAuthenticatedUser, async (req: Request, res: Response) => {
+    const userId = req.authenticatedUser!.userId;
+    const state = storage.getState();
+    const conn = state.gmailConnections[userId];
+    if (!conn || conn.status !== 'connected') {
+      return res.status(400).json({
+        error: 'GMAIL_NOT_CONNECTED',
+        message: 'Connect your personal Gmail account first to check employer replies.',
+      });
+    }
+    if (!conn.scopes.includes(GMAIL_READONLY_SCOPE)) {
+      return res.status(403).json({
+        error: 'GMAIL_READONLY_SCOPE_REQUIRED',
+        message: 'Reply reading requires optional gmail.readonly permission. Reconnect Gmail with Reply Tracking enabled to grant read-only access.',
+      });
+    }
+    try {
+      const { accessToken, gmailAddress } = await resolveValidUserAccessToken(userId);
+      const maxResults = Math.min(25, Math.max(1, Number(req.query?.limit || 10)));
+      const replies = await transport.listGmailReplies({ accessToken, maxResults });
+      return res.json({
+        success: true,
+        gmailAddress,
+        replies,
+      });
+    } catch (err: any) {
+      return res.status(err?.httpStatus || 500).json({
+        error: err?.code || 'GMAIL_REPLIES_FAILED',
+        message: err?.message || 'Unable to fetch employer replies from Gmail.',
+      });
+    }
   });
 
   // ==========================================================================
@@ -1926,19 +2971,16 @@ export function createMultiUserSaaSRouter(options?: {
     let conn = state.gmailConnections[userId];
     const cleanLiveToken = typeof liveClientAccessToken === 'string' ? liveClientAccessToken.trim() : '';
 
-    // If the authenticated user supplied a fresh client-side Google OAuth access token via header,
-    // verify/use it directly and keep their connection record fresh so client-side popup OAuth never expires prematurely.
+    // If a fresh client-side Google OAuth access token is supplied via header,
+    // ALWAYS verify its owning Gmail address via Google userinfo/tokeninfo before using or storing it.
     if (cleanLiveToken) {
-      let gmailAddress = conn?.gmailAddress || user?.email || '';
-      if (!gmailAddress || !gmailAddress.includes('@')) {
-        gmailAddress = (await transport.fetchGoogleUserEmail(cleanLiveToken)).trim().toLowerCase();
-      }
+      const verifiedEmail = (await transport.fetchGoogleUserEmail(cleanLiveToken)).trim().toLowerCase();
       const now = new Date().toISOString();
       const today = now.slice(0, 10);
       conn = {
         userId,
-        gmailAddress: gmailAddress.trim().toLowerCase(),
-        scopes: [GMAIL_SEND_ONLY_SCOPE],
+        gmailAddress: verifiedEmail,
+        scopes: conn?.scopes?.length ? conn.scopes : [GMAIL_SEND_ONLY_SCOPE],
         encryptedAccessToken: encryptTokenAtRest(cleanLiveToken),
         encryptedRefreshToken: conn?.encryptedRefreshToken || null,
         accessTokenExpiresAt: Date.now() + 3600 * 1000,
@@ -2036,6 +3078,10 @@ export function createMultiUserSaaSRouter(options?: {
       fileName: string;
       pdfBase64: string;
     } | null;
+    coverLetterPdf?: {
+      fileName: string;
+      pdfBase64: string;
+    } | null;
     isRetry?: boolean;
     existingHistoryId?: string;
     liveClientAccessToken?: string | null;
@@ -2129,17 +3175,28 @@ export function createMultiUserSaaSRouter(options?: {
       throw err;
     }
 
+    const attachmentsList: Array<{ filename: string; mimeType: string; base64Data: string }> = [
+      {
+        filename: attachmentFilename,
+        mimeType: 'application/pdf',
+        base64Data: attachmentBase64,
+      },
+    ];
+    if (params.coverLetterPdf?.pdfBase64) {
+      attachmentsList.push({
+        filename: params.coverLetterPdf.fileName || 'Cover_Letter.pdf',
+        mimeType: 'application/pdf',
+        base64Data: params.coverLetterPdf.pdfBase64,
+      });
+    }
+
     const rawMimeBase64Url = buildMimeEmailWithAttachment({
       fromEmail: gmailAddress,
       fromName: user.displayName,
       toEmail: cleanRecipient,
       subject: params.subject,
       bodyText: params.coverLetter,
-      attachment: {
-        filename: attachmentFilename,
-        mimeType: 'application/pdf',
-        base64Data: attachmentBase64,
-      },
+      attachments: attachmentsList,
     });
 
     const now = new Date().toISOString();
@@ -2174,13 +3231,36 @@ export function createMultiUserSaaSRouter(options?: {
       historyRecord.updatedAt = now;
     }
 
-    try {
-      const sendResult = await transport.sendGmailRawMessage({
-        accessToken,
-        senderEmail: gmailAddress,
-        rawMimeBase64Url,
-      });
+    // Bounded automatic retry ONLY for transient 429/5xx network errors while ensuring no duplicate sends
+    let sendResult: { id: string; threadId: string } | null = null;
+    let lastSendErr: any = null;
+    const maxAttempts = 3;
 
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (historyRecord.status === 'sent' && historyRecord.gmailMessageId) {
+        break;
+      }
+      try {
+        sendResult = await transport.sendGmailRawMessage({
+          accessToken,
+          senderEmail: gmailAddress,
+          rawMimeBase64Url,
+        });
+        lastSendErr = null;
+        break;
+      } catch (attemptErr: any) {
+        lastSendErr = attemptErr;
+        const code = Number(attemptErr?.httpStatus || 0);
+        const isTransient = code === 429 || code === 500 || code === 502 || code === 503 || code === 504;
+        if (!isTransient || attempt === maxAttempts) {
+          break;
+        }
+        historyRecord.retryCount += 1;
+        await new Promise(resolve => setTimeout(resolve, retryDelayMs * attempt));
+      }
+    }
+
+    if (sendResult) {
       historyRecord.status = 'sent';
       historyRecord.httpStatus = 200;
       historyRecord.gmailMessageId = sendResult.id;
@@ -2216,25 +3296,74 @@ export function createMultiUserSaaSRouter(options?: {
       storage.save();
 
       return historyRecord;
-    } catch (sendErr: any) {
-      const failureReason = sendErr?.message || 'Gmail API send failed';
-      historyRecord.status = 'failed';
-      historyRecord.httpStatus = sendErr?.httpStatus || 500;
-      historyRecord.errorReason = failureReason;
-      historyRecord.updatedAt = new Date().toISOString();
-
-      connection.lastError = failureReason;
-      if (sendErr?.httpStatus === 401 || sendErr?.httpStatus === 403) {
-        connection.status = 'revoked';
-      }
-      state.systemStats.totalEmailsFailed += 1;
-      storage.save();
-
-      const err: any = new Error(failureReason);
-      err.httpStatus = historyRecord.httpStatus;
-      err.historyRecord = historyRecord;
-      throw err;
     }
+
+    const sendErr = lastSendErr;
+    const failureReason = sendErr?.message || 'Gmail API send failed';
+    historyRecord.status = 'failed';
+    historyRecord.httpStatus = sendErr?.httpStatus || 500;
+    historyRecord.errorReason = failureReason;
+    historyRecord.updatedAt = new Date().toISOString();
+
+    connection.lastError = failureReason;
+    if (sendErr?.httpStatus === 401 || sendErr?.httpStatus === 403) {
+      connection.status = 'revoked';
+    }
+    state.systemStats.totalEmailsFailed += 1;
+    storage.save();
+
+    const err: any = new Error(failureReason);
+    err.httpStatus = historyRecord.httpStatus;
+    err.historyRecord = historyRecord;
+    throw err;
+  }
+
+  /**
+   * Server-side owner Gmail relay used ONLY for active, non-expired Guest Mode previews
+   * after explicit user confirmation (`guestOwnerAccountConfirmed: true`).
+   * Never exposes owner tokens or owner email history to the guest client.
+   */
+  async function resolveOwnerGmailForGuest(): Promise<{ accessToken: string; gmailAddress: string }> {
+    if (options?.ownerGmailCredentials?.email) {
+      if (options.ownerGmailCredentials.accessToken) {
+        return {
+          accessToken: options.ownerGmailCredentials.accessToken,
+          gmailAddress: options.ownerGmailCredentials.email.trim().toLowerCase(),
+        };
+      }
+      if (options.ownerGmailCredentials.refreshToken) {
+        const refreshed = await transport.refreshAccessToken(options.ownerGmailCredentials.refreshToken);
+        return {
+          accessToken: refreshed.access_token,
+          gmailAddress: options.ownerGmailCredentials.email.trim().toLowerCase(),
+        };
+      }
+    }
+
+    const envRefresh = process.env.OWNER_GMAIL_REFRESH_TOKEN?.trim();
+    const envAccess = process.env.OWNER_GMAIL_ACCESS_TOKEN?.trim();
+    const envEmail = (process.env.OWNER_GMAIL_ADDRESS || PRIMARY_ADMIN_EMAIL).trim().toLowerCase();
+
+    if (envRefresh) {
+      const refreshed = await transport.refreshAccessToken(envRefresh);
+      return { accessToken: refreshed.access_token, gmailAddress: envEmail };
+    }
+    if (envAccess) {
+      return { accessToken: envAccess, gmailAddress: envEmail };
+    }
+
+    // Fallback to owner's stored encrypted connection on server (strictly for Guest relay)
+    const state = storage.getState();
+    const ownerConn = state.gmailConnections['usr_owner_fazle_rabbi'];
+    if (ownerConn && ownerConn.status === 'connected') {
+      const resolved = await resolveValidUserAccessToken('usr_owner_fazle_rabbi');
+      return { accessToken: resolved.accessToken, gmailAddress: resolved.gmailAddress };
+    }
+
+    const err: any = new Error('Owner Gmail account is not configured on the server for Guest preview sending. Please sign up and connect your own Gmail account.');
+    err.code = 'OWNER_GMAIL_NOT_CONFIGURED';
+    err.httpStatus = 503;
+    throw err;
   }
 
   // Preview email before sending
@@ -2267,8 +3396,9 @@ export function createMultiUserSaaSRouter(options?: {
   });
 
   // Send single email or batch of distinct individual emails (never CC/BCC)
-  router.post('/gmail/send', requireAuthenticatedUser, async (req: Request, res: Response) => {
-    const userId = req.authenticatedUser!.userId;
+  // Registered users send strictly from their own connected Gmail.
+  // Active Guests may send up to MAX_GUEST_EMAILS_PER_SESSION via owner's backend Gmail ONLY with explicit owner-account confirmation.
+  router.post('/gmail/send', requireAuthenticatedOrActiveGuest, async (req: Request, res: Response) => {
     const explicitConsent = req.body?.userConfirmedSend !== false;
     if (!explicitConsent) {
       return res.status(400).json({
@@ -2296,12 +3426,134 @@ export function createMultiUserSaaSRouter(options?: {
       });
     }
 
+    // Branch A: Server-enforced Guest Mode (explicit owner-account confirmation required)
+    if (req.guestSession) {
+      if (req.body?.guestOwnerAccountConfirmed !== true) {
+        return res.status(400).json({
+          error: 'GUEST_OWNER_CONFIRMATION_REQUIRED',
+          message:
+            'Guest Mode emails are dispatched through the platform owner’s configured Gmail account. Please explicitly confirm (guestOwnerAccountConfirmed: true) or sign up to connect your own Gmail.',
+        });
+      }
+
+      const state = storage.getState();
+      const guestRecord = state.guestSessions[req.guestSession.guestId];
+      if (!guestRecord || guestRecord.status !== 'active' || Date.now() >= guestRecord.expiresAt) {
+        return res.status(401).json({
+          error: 'GUEST_SESSION_EXPIRED',
+          requiresAuth: true,
+          message: 'Your guest session has expired. Please sign up or log in.',
+        });
+      }
+
+      if (guestRecord.emailsSentCount + recipientsInput.length > MAX_GUEST_EMAILS_PER_SESSION) {
+        return res.status(429).json({
+          error: 'GUEST_SEND_LIMIT_REACHED',
+          requiresAuth: true,
+          message: `Guest preview sessions are limited to ${MAX_GUEST_EMAILS_PER_SESSION} emails. Sign up for a free account to send from your own Gmail.`,
+        });
+      }
+
+      const subject = String(req.body?.subject || '').trim();
+      const coverLetter = String(req.body?.coverLetter || '').trim();
+      if (!subject || !coverLetter) {
+        return res.status(400).json({
+          error: 'MISSING_SUBJECT_OR_BODY',
+          message: 'Email subject and cover letter body are required.',
+        });
+      }
+
+      let ownerGmail: { accessToken: string; gmailAddress: string };
+      try {
+        ownerGmail = await resolveOwnerGmailForGuest();
+      } catch (err: any) {
+        return res.status(err?.httpStatus || 503).json({
+          error: err?.code || 'OWNER_GMAIL_NOT_CONFIGURED',
+          message: err?.message || 'Owner Gmail is not configured for Guest preview sending.',
+        });
+      }
+
+      const inlineCv = req.body?.inlineCv || null;
+      const coverLetterPdf = req.body?.coverLetterPdf || null;
+      const attachments: Array<{ filename: string; mimeType: string; base64Data: string }> = [];
+      if (inlineCv?.pdfBase64) {
+        attachments.push({
+          filename: inlineCv.fileName || 'Guest_CV.pdf',
+          mimeType: 'application/pdf',
+          base64Data: inlineCv.pdfBase64,
+        });
+      }
+      if (coverLetterPdf?.pdfBase64) {
+        attachments.push({
+          filename: coverLetterPdf.fileName || 'Cover_Letter.pdf',
+          mimeType: 'application/pdf',
+          base64Data: coverLetterPdf.pdfBase64,
+        });
+      }
+
+      const guestResults: GuestEmailHistoryEntry[] = [];
+      const guestErrors: Array<{ recipientEmail: string; error: string }> = [];
+
+      for (const item of recipientsInput) {
+        const recipientEmail = (typeof item === 'string' ? item : String(item?.recipientEmail || '')).trim().toLowerCase();
+        if (!recipientEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+          guestErrors.push({ recipientEmail, error: `Invalid recipient email address: ${recipientEmail}` });
+          continue;
+        }
+        try {
+          const rawMimeBase64Url = buildMimeEmailWithAttachment({
+            fromEmail: ownerGmail.gmailAddress,
+            fromName: 'ZENVIK Guest Preview',
+            toEmail: recipientEmail,
+            subject,
+            bodyText: coverLetter,
+            attachments,
+          });
+          const sendRes = await transport.sendGmailRawMessage({
+            accessToken: ownerGmail.accessToken,
+            senderEmail: ownerGmail.gmailAddress,
+            rawMimeBase64Url,
+          });
+          const entry: GuestEmailHistoryEntry = {
+            id: `gem_${crypto.randomBytes(6).toString('hex')}`,
+            recipientEmail,
+            subject,
+            company: typeof item === 'object' ? item?.company : req.body?.company,
+            position: typeof item === 'object' ? item?.position : req.body?.position,
+            senderMode: 'owner_guest_relay',
+            gmailMessageId: sendRes.id,
+            status: 'sent',
+            timestamp: new Date().toISOString(),
+          };
+          guestRecord.emailsSentCount += 1;
+          guestRecord.emailHistory.unshift(entry);
+          guestResults.push(entry);
+        } catch (sendErr: any) {
+          guestErrors.push({ recipientEmail, error: sendErr?.message || 'Guest email send failed' });
+        }
+      }
+      storage.save();
+      const allSucceeded = guestErrors.length === 0 && guestResults.length > 0;
+      return res.status(allSucceeded ? 200 : guestResults.length > 0 ? 207 : 400).json({
+        success: allSucceeded,
+        guestMode: true,
+        senderMode: 'owner_guest_relay',
+        sentCount: guestResults.length,
+        failedCount: guestErrors.length,
+        results: guestResults,
+        errors: guestErrors,
+      });
+    }
+
+    // Branch B: Registered User (strictly personal Gmail, ZERO owner fallback)
+    const userId = req.authenticatedUser!.userId;
     const state = storage.getState();
     const user = state.users[userId];
     const subject = String(req.body?.subject || user?.defaultEmailSubject || '').trim();
     const coverLetter = String(req.body?.coverLetter || user?.defaultCoverLetter || '').trim();
     const cvId = req.body?.cvId ? String(req.body.cvId) : undefined;
     const inlineCv = req.body?.inlineCv || null;
+    const coverLetterPdf = req.body?.coverLetterPdf || null;
 
     if (!subject || !coverLetter) {
       return res.status(400).json({
@@ -2330,6 +3582,7 @@ export function createMultiUserSaaSRouter(options?: {
           coverLetter,
           cvId,
           inlineCv,
+          coverLetterPdf,
           liveClientAccessToken,
         });
         results.push(record);
@@ -2608,27 +3861,64 @@ export function createMultiUserSaaSRouter(options?: {
   // 6. CLOUD RUN HEALTH CHECK & OPENAPI REST DOCUMENTATION (PHASES 2 & 10)
   // ==========================================================================
 
-  router.get('/health', (_req: Request, res: Response) => {
+  router.get('/health', (req: Request, res: Response) => {
     const state = storage.getState();
     const providerStatus = aiCooperativeEngine.getProviderStatusSummary();
     const daemonStatus = jobDatabaseEngine.getDaemonStatus();
     const activeUsers = Object.values(state.users).filter(u => u.status === 'active').length;
+    const oauthCreds = getOAuthCredentials(req);
+
+    // Live AES-256-GCM encryption self-check
+    let encryptionVerified = false;
+    try {
+      const probe = 'zenvik_health_probe';
+      const enc = encryptTokenAtRest(probe);
+      encryptionVerified = decryptTokenAtRest(enc) === probe;
+    } catch {
+      encryptionVerified = false;
+    }
+
+    // Live storage read/write verification
+    let storageWritable = false;
+    try {
+      storage.save();
+      storageWritable = true;
+    } catch {
+      storageWritable = false;
+    }
 
     return res.status(200).json({
-      status: 'healthy',
+      status: encryptionVerified && storageWritable ? 'healthy' : 'degraded',
       service: 'zenvik-agent-multiuser-backend',
       runtime: 'google-cloud-run-ready',
       timestamp: new Date().toISOString(),
       uptimeSeconds: Math.round(process.uptime()),
       database: {
-        status: 'connected',
+        status: storageWritable ? 'connected' : 'error',
+        readWriteVerified: storageWritable,
         firestoreProjectId: (firebaseConfig as any).projectId || 'ccd---a-better-you-every-day',
         firestoreDatabaseId: (firebaseConfig as any).firestoreDatabaseId || 'ai-studio-e4405bff-96e5-4e9d-8fc6-6665341e100c',
         activeUsersCount: activeUsers,
         indexedJobsCount: daemonStatus.totalDiscovered,
       },
+      oauth: {
+        configured: oauthCreds.isConfigured,
+        hasClientId: Boolean(oauthCreds.clientId),
+        hasClientSecret: Boolean(oauthCreds.clientSecret),
+        redirectUri: oauthCreds.redirectUri,
+        minimumScope: GMAIL_SEND_ONLY_SCOPE,
+      },
+      guestMode: {
+        enabled: true,
+        durationSeconds: Math.round(getConfiguredGuestDurationMs() / 1000),
+        maxEmailsPerSession: MAX_GUEST_EMAILS_PER_SESSION,
+        ownerGeminiConfigured: hasOwnerGeminiConfigured(),
+        ownerGmailConfigured: hasOwnerGmailConfigured(),
+      },
       aiProviders: {
         defaultProvider: state.adminSettings.defaultProvider,
+        byokSupported: true,
+        supportedByokModels: SUPPORTED_GEMINI_BYOK_MODELS,
         gemini: {
           enabled: state.adminSettings.geminiEnabled,
           configured: providerStatus.gemini.configured,
@@ -2650,6 +3940,7 @@ export function createMultiUserSaaSRouter(options?: {
       },
       security: {
         tokenEncryption: 'aes-256-gcm',
+        encryptionVerified,
         gmailScope: GMAIL_SEND_ONLY_SCOPE,
         userIsolation: 'strict-token-derived-userid',
         rateLimitPerMinute: state.adminSettings.rateLimitPerMinute,
@@ -2912,11 +4203,11 @@ export function createMultiUserSaaSRouter(options?: {
   });
 
   function handleMultiUserJobSearch(req: Request, res: Response) {
-    const userId = req.authenticatedUser!.userId;
+    const userId = req.authenticatedUser?.userId || null;
     const state = storage.getState();
-    const userPrefs = state.jobPreferencesByUser[userId];
-    const userSaved = state.savedJobsByUser[userId] || [];
-    const userApps = state.applicationsByUser[userId] || [];
+    const userPrefs = userId ? state.jobPreferencesByUser[userId] : undefined;
+    const userSaved = userId ? state.savedJobsByUser[userId] || [] : [];
+    const userApps = userId ? state.applicationsByUser[userId] || [] : [];
 
     const sourceParams = { ...(req.query || {}), ...(req.body || {}) };
     const countryFilter = String(sourceParams.country || '').trim().toLowerCase();
@@ -3034,8 +4325,8 @@ export function createMultiUserSaaSRouter(options?: {
     });
   }
 
-  router.get('/multiuser/jobs/search', requireAuthenticatedUser, handleMultiUserJobSearch);
-  router.post('/multiuser/jobs/search', requireAuthenticatedUser, handleMultiUserJobSearch);
+  router.get('/multiuser/jobs/search', requireAuthenticatedOrActiveGuest, handleMultiUserJobSearch);
+  router.post('/multiuser/jobs/search', requireAuthenticatedOrActiveGuest, handleMultiUserJobSearch);
 
   router.get('/multiuser/saved-jobs', requireAuthenticatedUser, (req: Request, res: Response) => {
     const userId = req.authenticatedUser!.userId;
@@ -3149,11 +4440,266 @@ export function createMultiUserSaaSRouter(options?: {
     });
   });
 
-  router.post('/ai/gemini/generate', requireAuthenticatedUser, async (req: Request, res: Response) => {
+  // ==========================================================================
+  // 9B. PER-USER GEMINI API BYOK (BRING YOUR OWN KEY) SETTINGS & VERIFICATION
+  // ==========================================================================
+
+  function classifyGeminiError(err: any): {
+    code: 'GEMINI_INVALID_KEY' | 'GEMINI_QUOTA_EXCEEDED' | 'GEMINI_MODEL_UNAVAILABLE' | 'GEMINI_TRANSIENT_ERROR';
+    httpStatus: number;
+    configStatus: 'invalid' | 'quota_exceeded' | 'connected';
+    retryable: boolean;
+    message: string;
+  } {
+    const status = Number(err?.status || err?.httpStatus || err?.code || 0);
+    const msg = String(err?.message || err || 'Gemini API request failed');
+    const lower = msg.toLowerCase();
+
+    if (
+      status === 401 ||
+      status === 403 ||
+      lower.includes('api_key_invalid') ||
+      lower.includes('api key not valid') ||
+      lower.includes('invalid api key') ||
+      lower.includes('permission_denied') ||
+      lower.includes('unauthorized')
+    ) {
+      return {
+        code: 'GEMINI_INVALID_KEY',
+        httpStatus: 400,
+        configStatus: 'invalid',
+        retryable: false,
+        message: 'Your Gemini API key was rejected by Google (invalid or unauthorized). Please update your key in AI Settings.',
+      };
+    }
+
+    if (
+      status === 429 ||
+      lower.includes('429') ||
+      lower.includes('quota') ||
+      lower.includes('resource_exhausted') ||
+      lower.includes('rate limit')
+    ) {
+      return {
+        code: 'GEMINI_QUOTA_EXCEEDED',
+        httpStatus: 429,
+        configStatus: 'quota_exceeded',
+        retryable: false,
+        message: 'Gemini API quota or rate limit exceeded for this API key. Wait a moment or check your Google AI billing quota.',
+      };
+    }
+
+    if (status === 404 || lower.includes('not_found') || lower.includes('model not found') || lower.includes('not supported')) {
+      return {
+        code: 'GEMINI_MODEL_UNAVAILABLE',
+        httpStatus: 400,
+        configStatus: 'connected',
+        retryable: false,
+        message: `Selected Gemini model is unavailable (${msg}). Try switching to ${DEFAULT_GEMINI_BYOK_MODEL}.`,
+      };
+    }
+
+    return {
+      code: 'GEMINI_TRANSIENT_ERROR',
+      httpStatus: 503,
+      configStatus: 'connected',
+      retryable: true,
+      message: `Temporary Gemini API error: ${msg}`,
+    };
+  }
+
+  function sanitizeGeminiConfigForClient(userId: string) {
+    const state = storage.getState();
+    const cfg = state.geminiConfigsByUser[userId];
+    return {
+      hasPersonalKey: Boolean(cfg?.encryptedApiKey),
+      keyMasked: cfg?.keyMasked || null,
+      selectedModel: cfg?.selectedModel || DEFAULT_GEMINI_BYOK_MODEL,
+      supportedModels: [...SUPPORTED_GEMINI_BYOK_MODELS],
+      status: cfg?.encryptedApiKey ? cfg.status : 'unconfigured',
+      verifiedAt: cfg?.verifiedAt || null,
+      lastTestedAt: cfg?.lastTestedAt || null,
+      lastUsedAt: cfg?.lastUsedAt || null,
+      lastError: cfg?.lastError || null,
+      totalRequests: cfg?.totalRequests || 0,
+      totalErrors: cfg?.totalErrors || 0,
+      updatedAt: cfg?.updatedAt || null,
+      platformFallbackAvailable: hasOwnerGeminiConfigured(),
+    };
+  }
+
+  router.get('/multiuser/ai/settings', requireAuthenticatedUser, (req: Request, res: Response) => {
     const userId = req.authenticatedUser!.userId;
+    return res.json({
+      success: true,
+      settings: sanitizeGeminiConfigForClient(userId),
+    });
+  });
+
+  router.put('/multiuser/ai/settings', requireAuthenticatedUser, async (req: Request, res: Response) => {
+    const userId = req.authenticatedUser!.userId;
+    const state = storage.getState();
+    const existing = state.geminiConfigsByUser[userId];
+    const now = new Date().toISOString();
+
+    const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : undefined;
+    const requestedModel =
+      typeof req.body?.selectedModel === 'string' && req.body.selectedModel.trim()
+        ? req.body.selectedModel.trim()
+        : existing?.selectedModel || DEFAULT_GEMINI_BYOK_MODEL;
+
+    if (rawKey !== undefined && rawKey.length > 0 && rawKey.length < 10) {
+      return res.status(400).json({
+        error: 'INVALID_API_KEY_FORMAT',
+        message: 'The provided Gemini API key appears too short to be valid.',
+      });
+    }
+
+    const nextConfig: StoredUserGeminiConfig = {
+      userId,
+      encryptedApiKey: rawKey ? encryptTokenAtRest(rawKey) : existing?.encryptedApiKey || null,
+      keyMasked: rawKey ? maskApiKey(rawKey) : existing?.keyMasked || null,
+      selectedModel: requestedModel,
+      status: rawKey ? 'connected' : existing?.status || 'unconfigured',
+      verifiedAt: rawKey ? null : existing?.verifiedAt || null,
+      lastTestedAt: existing?.lastTestedAt || null,
+      lastUsedAt: existing?.lastUsedAt || null,
+      lastError: rawKey ? null : existing?.lastError || null,
+      totalRequests: existing?.totalRequests || 0,
+      totalErrors: existing?.totalErrors || 0,
+      updatedAt: now,
+    };
+
+    if (req.body?.verifyNow === true && (rawKey || nextConfig.encryptedApiKey)) {
+      const keyToTest = rawKey || decryptTokenAtRest(nextConfig.encryptedApiKey) || '';
+      try {
+        await transport.generateGeminiContent({
+          apiKey: keyToTest,
+          model: nextConfig.selectedModel,
+          prompt: 'Reply with OK.',
+        });
+        nextConfig.status = 'connected';
+        nextConfig.verifiedAt = now;
+        nextConfig.lastTestedAt = now;
+        nextConfig.lastError = null;
+      } catch (err: any) {
+        const classified = classifyGeminiError(err);
+        nextConfig.status = classified.configStatus;
+        nextConfig.lastTestedAt = now;
+        nextConfig.lastError = classified.message;
+        nextConfig.totalErrors += 1;
+        state.geminiConfigsByUser[userId] = nextConfig;
+        storage.save();
+        return res.status(classified.httpStatus).json({
+          success: false,
+          error: classified.code,
+          message: classified.message,
+          settings: sanitizeGeminiConfigForClient(userId),
+        });
+      }
+    }
+
+    state.geminiConfigsByUser[userId] = nextConfig;
+    storage.appendLog('info', 'gemini_byok_updated', `User updated personal Gemini BYOK settings (model=${nextConfig.selectedModel})`, userId);
+    storage.save();
+
+    return res.json({
+      success: true,
+      settings: sanitizeGeminiConfigForClient(userId),
+    });
+  });
+
+  router.delete('/multiuser/ai/key', requireAuthenticatedUser, (req: Request, res: Response) => {
+    const userId = req.authenticatedUser!.userId;
+    const state = storage.getState();
+    const existing = state.geminiConfigsByUser[userId];
+    if (existing) {
+      existing.encryptedApiKey = null;
+      existing.keyMasked = null;
+      existing.status = 'unconfigured';
+      existing.verifiedAt = null;
+      existing.lastError = null;
+      existing.updatedAt = new Date().toISOString();
+      storage.appendLog('info', 'gemini_byok_removed', 'User removed personal Gemini API key', userId);
+      storage.save();
+    }
+    return res.json({
+      success: true,
+      message: 'Your personal Gemini API key has been permanently deleted from encrypted storage.',
+      settings: sanitizeGeminiConfigForClient(userId),
+    });
+  });
+
+  router.post('/multiuser/ai/test', requireAuthenticatedUser, async (req: Request, res: Response) => {
+    const userId = req.authenticatedUser!.userId;
+    const state = storage.getState();
+    const existing = state.geminiConfigsByUser[userId];
+    const overrideKey = typeof req.body?.apiKey === 'string' && req.body.apiKey.trim() ? req.body.apiKey.trim() : null;
+    const decryptedStored = decryptTokenAtRest(existing?.encryptedApiKey);
+    const keyToTest = overrideKey || decryptedStored;
+    const model =
+      typeof req.body?.selectedModel === 'string' && req.body.selectedModel.trim()
+        ? req.body.selectedModel.trim()
+        : existing?.selectedModel || DEFAULT_GEMINI_BYOK_MODEL;
+
+    if (!keyToTest) {
+      return res.status(400).json({
+        success: false,
+        error: 'GEMINI_KEY_NOT_CONFIGURED',
+        message: 'No personal Gemini API key is configured. Enter your API key to test connectivity.',
+      });
+    }
+
+    const startedAt = Date.now();
+    const now = new Date().toISOString();
+    try {
+      const result = await transport.generateGeminiContent({
+        apiKey: keyToTest,
+        model,
+        prompt: 'Respond with the single word OK to confirm connectivity.',
+      });
+      const latencyMs = Date.now() - startedAt;
+      if (existing && !overrideKey) {
+        existing.status = 'connected';
+        existing.verifiedAt = now;
+        existing.lastTestedAt = now;
+        existing.lastError = null;
+        existing.updatedAt = now;
+        storage.save();
+      }
+      return res.json({
+        success: true,
+        connected: true,
+        model: result.model || model,
+        latencyMs,
+        preview: result.text.slice(0, 80),
+        settings: sanitizeGeminiConfigForClient(userId),
+      });
+    } catch (err: any) {
+      const classified = classifyGeminiError(err);
+      if (existing && !overrideKey) {
+        existing.status = classified.configStatus;
+        existing.lastTestedAt = now;
+        existing.lastError = classified.message;
+        existing.totalErrors += 1;
+        existing.updatedAt = now;
+        storage.save();
+      }
+      return res.status(classified.httpStatus).json({
+        success: false,
+        connected: false,
+        error: classified.code,
+        message: classified.message,
+        settings: sanitizeGeminiConfigForClient(userId),
+      });
+    }
+  });
+
+  router.post('/ai/gemini/generate', requireAuthenticatedOrActiveGuest, async (req: Request, res: Response) => {
     const prompt = String(req.body?.prompt || '').trim();
     const operation = String(req.body?.operation || 'career_assistant').trim();
     const systemInstruction = req.body?.systemInstruction ? String(req.body.systemInstruction).trim() : undefined;
+    const requestedModel = typeof req.body?.model === 'string' && req.body.model.trim() ? req.body.model.trim() : null;
 
     if (!prompt) {
       return res.status(400).json({
@@ -3165,51 +4711,148 @@ export function createMultiUserSaaSRouter(options?: {
     const state = storage.getState();
     const adminCfg = state.adminSettings;
     const startTime = Date.now();
-    const geminiKey = process.env.GEMINI_API_KEY?.trim();
+
+    // Branch 1: Active Guest Session -> Strictly uses server's configured GEMINI_API_KEY (owner key)
+    if (req.guestSession) {
+      const guestRecord = state.guestSessions[req.guestSession.guestId];
+      const serverGuestKey = (options?.guestGeminiApiKey || process.env.GEMINI_API_KEY || '').trim();
+      const usedModel = requestedModel || adminCfg.geminiModel || DEFAULT_GEMINI_BYOK_MODEL;
+
+      if (!serverGuestKey || serverGuestKey === 'undefined' || serverGuestKey === 'null') {
+        return res.status(503).json({
+          error: 'GUEST_GEMINI_UNAVAILABLE',
+          message: 'Guest preview AI key is not configured on the server. Sign up and add your own Gemini API key.',
+        });
+      }
+
+      try {
+        const result = await transport.generateGeminiContent({
+          apiKey: serverGuestKey,
+          model: usedModel,
+          prompt,
+          systemInstruction,
+        });
+        if (guestRecord) {
+          guestRecord.aiRequestsCount += 1;
+          guestRecord.lastActiveAt = Date.now();
+        }
+        state.systemStats.totalAiRequests = (state.systemStats.totalAiRequests || 0) + 1;
+        storage.save();
+        return res.json({
+          success: true,
+          guestMode: true,
+          keySource: 'server_guest_key',
+          provider: 'Gemini',
+          model: result.model || usedModel,
+          status: 'success',
+          latencyMs: Date.now() - startTime,
+          text: result.text,
+        });
+      } catch (err: any) {
+        const classified = classifyGeminiError(err);
+        return res.status(classified.httpStatus).json({
+          success: false,
+          guestMode: true,
+          error: classified.code,
+          message: classified.message,
+        });
+      }
+    }
+
+    // Branch 2: Registered User -> Strictly uses personal BYOK Gemini key if configured (NEVER another user's key!)
+    const userId = req.authenticatedUser!.userId;
+    const userGeminiCfg = state.geminiConfigsByUser[userId];
+    const personalKey = decryptTokenAtRest(userGeminiCfg?.encryptedApiKey);
+    const serverFallbackKey = (options?.guestGeminiApiKey || process.env.GEMINI_API_KEY || '').trim();
+    const hasServerKey = Boolean(serverFallbackKey && serverFallbackKey !== 'undefined' && serverFallbackKey !== 'null');
 
     let outputText = '';
     let usedProvider: 'Gemini' | 'OpenAI' | 'DeterministicFallback' = 'Gemini';
-    let usedModel = adminCfg.geminiModel || 'gemini-4-hydrogen';
+    let usedModel = requestedModel || userGeminiCfg?.selectedModel || adminCfg.geminiModel || DEFAULT_GEMINI_BYOK_MODEL;
     let status: 'success' | 'fallback' | 'error' = 'success';
+    let keySource: 'user_byok' | 'server_managed' | 'deterministic_fallback' = 'user_byok';
 
-    if (adminCfg.geminiEnabled && geminiKey && geminiKey !== 'undefined' && geminiKey !== 'null') {
+    if (personalKey) {
+      // Strictly execute with this user's own personal key — NEVER silently switch to another user's key
+      keySource = 'user_byok';
+      let lastErr: any = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const result = await transport.generateGeminiContent({
+            apiKey: personalKey,
+            model: usedModel,
+            prompt,
+            systemInstruction,
+          });
+          outputText = result.text;
+          usedModel = result.model || usedModel;
+          lastErr = null;
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          const classified = classifyGeminiError(err);
+          if (!classified.retryable || attempt === 2) {
+            userGeminiCfg.status = classified.configStatus;
+            userGeminiCfg.lastError = classified.message;
+            userGeminiCfg.totalErrors += 1;
+            userGeminiCfg.updatedAt = new Date().toISOString();
+            storage.save();
+            return res.status(classified.httpStatus).json({
+              success: false,
+              keySource: 'user_byok',
+              error: classified.code,
+              message: classified.message,
+            });
+          }
+          await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+        }
+      }
+      if (!lastErr && userGeminiCfg) {
+        userGeminiCfg.status = 'connected';
+        userGeminiCfg.lastUsedAt = new Date().toISOString();
+        userGeminiCfg.lastError = null;
+        userGeminiCfg.totalRequests += 1;
+        userGeminiCfg.updatedAt = userGeminiCfg.lastUsedAt;
+      }
+    } else if (req.body?.requirePersonalKey === true) {
+      return res.status(400).json({
+        error: 'PERSONAL_GEMINI_KEY_REQUIRED',
+        message: 'Please configure your personal Gemini API key in AI Settings first.',
+      });
+    } else if (adminCfg.geminiEnabled && hasServerKey) {
+      keySource = 'server_managed';
       try {
-        const ai = new GoogleGenAI({
-          apiKey: geminiKey,
-          httpOptions: {
-            headers: {
-              'User-Agent': 'aistudio-build',
-            },
-          },
-        });
-        const response = await ai.models.generateContent({
+        const result = await transport.generateGeminiContent({
+          apiKey: serverFallbackKey,
           model: usedModel,
-          contents: prompt,
-          config: systemInstruction ? { systemInstruction } : undefined,
+          prompt,
+          systemInstruction,
         });
-        outputText = (response.text || '').trim();
+        outputText = result.text;
       } catch (err: any) {
-        const errMsg = err?.message || String(err);
+        const classified = classifyGeminiError(err);
         if (!adminCfg.fallbackEnabled) {
-          return res.status(502).json({
-            error: 'GEMINI_GENERATION_FAILED',
-            message: errMsg,
+          return res.status(classified.httpStatus).json({
+            error: classified.code,
+            message: classified.message,
           });
         }
         status = 'fallback';
         usedProvider = 'DeterministicFallback';
         usedModel = 'zenvik-career-fallback-v1';
+        keySource = 'deterministic_fallback';
         outputText = `Professional Career Intelligence Summary for "${prompt.slice(0, 80)}": Focus on verified employer career portals, tailor your CV from the CV Gallery to match role requirements, and highlight international hospitality or technical certifications.`;
       }
     } else if (adminCfg.fallbackEnabled) {
       status = 'fallback';
       usedProvider = 'DeterministicFallback';
       usedModel = 'zenvik-career-fallback-v1';
+      keySource = 'deterministic_fallback';
       outputText = `Professional Career Intelligence Summary for "${prompt.slice(0, 80)}": Focus on verified employer career portals, tailor your CV from the CV Gallery to match role requirements, and highlight international hospitality or technical certifications.`;
     } else {
       return res.status(503).json({
         error: 'AI_PROVIDER_UNAVAILABLE',
-        message: 'Gemini AI is currently disabled or not configured on the server.',
+        message: 'Gemini AI is currently not configured. Add your personal Gemini API key in AI Settings.',
       });
     }
 
@@ -3235,6 +4878,7 @@ export function createMultiUserSaaSRouter(options?: {
 
     return res.json({
       success: true,
+      keySource,
       provider: usedProvider,
       model: usedModel,
       status,
@@ -3251,7 +4895,7 @@ export function createMultiUserSaaSRouter(options?: {
   });
 
   // ==========================================================================
-  // 10. FIRST-TIME USER SETUP WIZARD & CONNECTED SERVICES DASHBOARD (PHASE 15)
+  // 10. FIRST-TIME USER SETUP WIZARD (8-STEP ONBOARDING) & CONNECTED SERVICES
   // ==========================================================================
 
   router.get('/multiuser/setup-wizard', requireAuthenticatedUser, (req: Request, res: Response) => {
@@ -3279,8 +4923,10 @@ export function createMultiUserSaaSRouter(options?: {
       updatedAt: new Date().toISOString(),
     };
     const gmailConn = state.gmailConnections[userId];
+    const geminiByok = sanitizeGeminiConfigForClient(userId);
     const cvs = state.cvsByUser[userId] || [];
     const providerSummary = aiCooperativeEngine.getProviderStatusSummary();
+    const oauthCreds = getOAuthCredentials(req);
 
     return res.json({
       setupWizardCompleted: profile.setupWizardCompleted,
@@ -3291,20 +4937,38 @@ export function createMultiUserSaaSRouter(options?: {
           connected: Boolean(user),
           email: user?.email || null,
           displayName: user?.displayName || null,
+          emailVerified: Boolean(user?.emailVerified),
         },
         gmailConnection: {
           required: false,
           optional: true,
           connected: gmailConn?.status === 'connected',
+          status: gmailConn?.status || 'disconnected',
           gmailAddress: gmailConn?.gmailAddress || null,
+          scopes: gmailConn?.scopes || [],
           scope: GMAIL_SEND_ONLY_SCOPE,
+          hasRefreshToken: Boolean(gmailConn?.encryptedRefreshToken),
+          backendOAuthConfigured: oauthCreds.isConfigured,
+          lastError: gmailConn?.lastError || null,
         },
         aiServices: {
           required: false,
-          backendManaged: true,
-          geminiAvailable: state.adminSettings.geminiEnabled && providerSummary.gemini.configured,
+          byokConfigured: geminiByok.hasPersonalKey,
+          byokStatus: geminiByok.status,
+          byokVerified: Boolean(geminiByok.verifiedAt && geminiByok.status === 'connected'),
+          keyMasked: geminiByok.keyMasked,
+          selectedModel: geminiByok.selectedModel,
+          supportedModels: geminiByok.supportedModels,
+          backendManaged: hasOwnerGeminiConfigured(),
+          geminiAvailable: geminiByok.status === 'connected' || (state.adminSettings.geminiEnabled && providerSummary.gemini.configured),
           openaiAvailable: state.adminSettings.openaiEnabled && providerSummary.openai.configured,
-          model: state.adminSettings.geminiModel,
+          model: geminiByok.selectedModel || state.adminSettings.geminiModel,
+        },
+        backendConnectivity: {
+          required: true,
+          healthy: true,
+          databaseConnected: true,
+          oauthConfigured: oauthCreds.isConfigured,
         },
         cvStorage: {
           required: false,
@@ -3374,7 +5038,7 @@ export function createMultiUserSaaSRouter(options?: {
     storage.pushNotification(
       userId,
       'Setup Wizard Completed',
-      'Your ZENVIK AGENT workspace, job preferences, and connected service permissions are configured.',
+      'Your ZENVIK AGENT workspace, Gmail/AI configuration, and job preferences are ready.',
       'success'
     );
     storage.save();
@@ -3392,53 +5056,70 @@ export function createMultiUserSaaSRouter(options?: {
     const state = storage.getState();
     const user = state.users[userId];
     const conn = state.gmailConnections[userId];
+    const geminiByok = sanitizeGeminiConfigForClient(userId);
     const cvs = state.cvsByUser[userId] || [];
     const prefs = state.jobPreferencesByUser[userId];
     const providerSummary = aiCooperativeEngine.getProviderStatusSummary();
     const daemonStatus = jobDatabaseEngine.getDaemonStatus();
     const selectedCv = cvs.find(c => c.isDefault) || cvs[0] || null;
-    const geminiAvailable = state.adminSettings.geminiEnabled && providerSummary.gemini.configured;
+    const geminiAvailable =
+      geminiByok.status === 'connected' ||
+      (state.adminSettings.geminiEnabled && providerSummary.gemini.configured);
     const openaiAvailable = state.adminSettings.openaiEnabled && providerSummary.openai.configured;
 
     return res.json({
       timestamp: new Date().toISOString(),
       services: {
         googleAccount: {
-          name: 'Google Account Sign-In',
+          name: 'Account Identity & Session',
           status: user ? 'Connected' : 'Disconnected',
           permissionType: 'Required',
           email: user?.email || null,
           displayName: user?.displayName || null,
           authProvider: user?.authProvider || 'email',
+          emailVerified: Boolean(user?.emailVerified),
           lastConnectionAt: user?.lastLoginAt || null,
-          explanation: 'Establishes your unique ZENVIK user identity and isolates your cloud workspace. Does NOT grant Gmail sending access automatically.',
+          explanation: 'Establishes your unique ZENVIK user identity and strictly isolates your workspace, CVs, Gmail tokens, and Gemini API key.',
           error: null,
         },
         gmail: {
-          name: 'Personal Gmail API (gmail.send)',
+          name: 'Personal Gmail OAuth 2.0',
           status: conn?.status === 'connected' ? 'Connected' : 'Disconnected',
           rawStatus: conn?.status || 'disconnected',
           permissionType: 'Optional (Feature-Specific)',
           gmailAddress: conn?.gmailAddress || null,
-          scopes: conn?.scopes || [GMAIL_SEND_ONLY_SCOPE],
+          scopes: conn?.scopes || [],
+          hasRefreshToken: Boolean(conn?.encryptedRefreshToken),
           sentTodayCount: conn?.sentTodayCount || 0,
           dailyLimit: conn?.dailyLimit || user?.dailySendLimit || 40,
           lastConnectionAt: conn?.updatedAt || conn?.connectedAt || null,
-          explanation: 'Requests only https://www.googleapis.com/auth/gmail.send so you can send job applications with your CV from your own personal Gmail address. Never reads your inbox.',
+          explanation: 'Uses Google OAuth 2.0 Authorization Code Flow with AES-256-GCM encrypted server-side token storage. Minimum scope: gmail.send (optional gmail.readonly only if reply tracking is enabled).',
           error: conn?.lastError || null,
         },
         geminiAi: {
-          name: 'Google Gemini AI (Backend Managed)',
-          status: geminiAvailable ? 'Available' : 'Unavailable',
-          permissionType: 'Centrally Managed',
+          name: geminiByok.hasPersonalKey ? 'Google Gemini AI (Personal BYOK Key)' : 'Google Gemini AI',
+          status: geminiByok.hasPersonalKey
+            ? geminiByok.status === 'connected'
+              ? 'Connected'
+              : 'Error'
+            : geminiAvailable
+            ? 'Available'
+            : 'Unavailable',
+          permissionType: 'Personal BYOK (AES-256-GCM Encrypted)',
+          byokConfigured: geminiByok.hasPersonalKey,
+          byokStatus: geminiByok.status,
+          keyMasked: geminiByok.keyMasked,
           enabled: state.adminSettings.geminiEnabled,
           configuredOnServer: providerSummary.gemini.configured,
-          model: state.adminSettings.geminiModel,
-          totalRequests: providerSummary.gemini.totalRequests,
+          model: geminiByok.selectedModel || state.adminSettings.geminiModel,
+          totalRequests: geminiByok.hasPersonalKey ? geminiByok.totalRequests : providerSummary.gemini.totalRequests,
+          totalErrors: geminiByok.hasPersonalKey ? geminiByok.totalErrors : 0,
           avgLatencyMs: providerSummary.gemini.avgLatencyMs,
-          lastConnectionAt: providerSummary.gemini.lastCheckedAt,
-          explanation: 'Managed securely on the ZENVIK backend via Google Secret Manager / server environment. Users never need to enter a personal Gemini API key.',
-          error: providerSummary.gemini.lastError,
+          lastConnectionAt: geminiByok.lastUsedAt || geminiByok.lastTestedAt || providerSummary.gemini.lastCheckedAt,
+          explanation: geminiByok.hasPersonalKey
+            ? 'Using your personal Gemini API key encrypted at rest on the backend. Never shared with other users.'
+            : 'Add your own personal Gemini API key in AI Settings for independent quotas and usage tracking.',
+          error: geminiByok.lastError || providerSummary.gemini.lastError,
         },
         openai: {
           name: 'OpenAI Verification Engine (Backend Managed)',
@@ -3462,7 +5143,7 @@ export function createMultiUserSaaSRouter(options?: {
           selectedCvTitle: selectedCv?.title || null,
           selectedCvFileName: selectedCv?.fileName || null,
           lastConnectionAt: selectedCv?.updatedAt || null,
-          explanation: 'CV Gallery is the single source of truth for all job application attachments. Files are uploaded only through the app interface without unrestricted device storage permissions.',
+          explanation: 'CV Gallery is the single source of truth for all job application attachments. Isolated strictly per user account.',
           error: cvs.length === 0 ? 'Upload or sync at least one PDF CV in your CV Gallery before sending email applications.' : null,
         },
         jobSearchEngine: {
@@ -3672,10 +5353,44 @@ export function createMultiUserSaaSRouter(options?: {
     });
   });
 
+  function resolveGeminiKeyForRequest(req: Request): {
+    apiKey: string | null;
+    model: string;
+    source: 'user_byok' | 'server_managed' | 'none';
+  } {
+    const rawToken = extractTokenFromRequest(req);
+    if (rawToken && rawToken.startsWith('zvk.')) {
+      const session = verifySessionToken(rawToken);
+      const state = storage.getState();
+      if (session && !(session.jti && state.revokedSessionJtis[session.jti])) {
+        const cfg = state.geminiConfigsByUser[session.userId];
+        const decrypted = decryptTokenAtRest(cfg?.encryptedApiKey);
+        if (decrypted) {
+          return {
+            apiKey: decrypted,
+            model: cfg?.selectedModel || DEFAULT_GEMINI_BYOK_MODEL,
+            source: 'user_byok',
+          };
+        }
+      }
+    }
+    const serverKey = (options?.guestGeminiApiKey || process.env.GEMINI_API_KEY || '').trim();
+    if (serverKey && serverKey !== 'undefined' && serverKey !== 'null') {
+      return {
+        apiKey: serverKey,
+        model: storage.getState().adminSettings.geminiModel || DEFAULT_GEMINI_BYOK_MODEL,
+        source: 'server_managed',
+      };
+    }
+    return { apiKey: null, model: DEFAULT_GEMINI_BYOK_MODEL, source: 'none' };
+  }
+
   return {
     router,
     storage,
     handleOAuthCallback,
+    resolveGeminiKeyForRequest,
+    resolveGuestSessionFromToken,
   };
 }
 

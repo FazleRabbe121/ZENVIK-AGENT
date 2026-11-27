@@ -17,17 +17,132 @@
       "lastLoginAt": "2026-11-18T23:02:40.399Z"
     }
   },
+  "userProfilesByUser": {
+    "usr_owner_fazle_rabbi": {
+      "userId": "usr_owner_fazle_rabbi",
+      "headline": "Bartender & Barista · Hospitality & Visa Sponsorship Profile",
+      "phone": "",
+      "nationality": "Bangladesh",
+      "currentCountry": "Cyprus",
+      "setupWizardCompleted": true,
+      "setupCompletedAt": "2026-11-27T18:48:38.156Z",
+      "updatedAt": "2026-11-27T18:48:38.156Z"
+    }
+  },
+  "jobPreferencesByUser": {
+    "usr_owner_fazle_rabbi": {
+      "userId": "usr_owner_fazle_rabbi",
+      "preferredCountries": [
+        "United Kingdom",
+        "Cyprus",
+        "Malta",
+        "Croatia",
+        "Switzerland",
+        "Austria",
+        "Italy"
+      ],
+      "preferredCities": [
+        "London",
+        "Limassol",
+        "Paphos",
+        "Valletta",
+        "Dubrovnik"
+      ],
+      "jobCategories": [
+        "Bartender",
+        "Barista",
+        "Waiter",
+        "Hospitality & F&B"
+      ],
+      "employmentTypes": [
+        "Full-Time",
+        "Seasonal",
+        "Visa Sponsored"
+      ],
+      "sponsorshipRequired": true,
+      "relocationSupport": true,
+      "updatedAt": "2026-11-27T18:48:38.156Z"
+    }
+  },
   "gmailConnections": {},
+  "geminiConfigsByUser": {},
   "cvsByUser": {},
+  "savedJobsByUser": {},
   "applicationsByUser": {},
   "emailHistoryByUser": {},
+  "aiHistoryByUser": {},
+  "notificationsByUser": {},
   "pendingOAuthStates": {},
+  "revokedSessionJtis": {},
+  "passwordResetTokens": {},
+  "emailVerificationTokens": {},
+  "guestSessions": {
+    "gst_a762ae289cc7fc8cec8e": {
+      "guestId": "gst_a762ae289cc7fc8cec8e",
+      "clientFingerprint": "e063d98bcad98e62552f9766f27d34e2",
+      "createdAt": 1795805377334,
+      "expiresAt": 1795805557334,
+      "durationSeconds": 180,
+      "status": "ended",
+      "emailsSentCount": 0,
+      "aiRequestsCount": 0,
+      "lastActiveAt": 1795805377358,
+      "emailHistory": []
+    }
+  },
+  "guestCooldownsByFingerprint": {
+    "e063d98bcad98e62552f9766f27d34e2": {
+      "guestId": "gst_a762ae289cc7fc8cec8e",
+      "createdAt": 1795805377334,
+      "expiresAt": 1795805557334,
+      "cooldownUntil": 1795807357334
+    }
+  },
+  "adminSettings": {
+    "geminiEnabled": true,
+    "openaiEnabled": true,
+    "grokEnabled": true,
+    "defaultProvider": "Gemini",
+    "geminiModel": "gemini-4-hydrogen",
+    "openaiModel": "gpt-4o-mini",
+    "grokModel": "grok-2-latest",
+    "fallbackEnabled": true,
+    "rateLimitPerMinute": 240,
+    "activeJobSources": [
+      "official_employer_portals",
+      "eures_network",
+      "hosco_hospitality",
+      "linkedin_jobs",
+      "indeed_global",
+      "glassdoor_careers"
+    ],
+    "updatedAt": "2026-11-27T18:48:38.156Z"
+  },
+  "systemLogs": [
+    {
+      "id": "log_8664a58057a1",
+      "timestamp": "2026-11-27T18:49:37.335Z",
+      "level": "info",
+      "category": "guest_session_started",
+      "actorUserId": null,
+      "message": "Guest preview session gst_a762ae289cc7fc8cec8e started (180s)"
+    },
+    {
+      "id": "log_f431741b377d",
+      "timestamp": "2026-11-27T18:48:38.156Z",
+      "level": "info",
+      "category": "system_boot",
+      "actorUserId": "usr_owner_fazle_rabbi",
+      "message": "ZENVIK Multi-User SaaS & Personal Gmail Engine initialized."
+    }
+  ],
   "systemStats": {
     "totalRegistrations": 1,
     "totalEmailsSent": 0,
     "totalEmailsFailed": 0,
     "totalOAuthConnections": 0,
     "totalAuthErrors": 0,
-    "lastUpdatedAt": "2026-11-18T23:02:40.400Z"
+    "totalAiRequests": 0,
+    "lastUpdatedAt": "2026-11-27T18:49:37.363Z"
   }
 }
